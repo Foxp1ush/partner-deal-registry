@@ -78,6 +78,12 @@ def test_summary_and_kinds(env):
     assert evidence.summary({**row, "biz_no": seed.fake_biz_no(1)}, kinds | {"cert"}) == "사업자번호 · 명함 · 사업자등록증"
 
 
+def test_card_font_is_bundled():
+    # 리눅스 서버에서도 한글 명함이 깨지지 않도록 글꼴 파일이 저장소에 있어야 한다
+    assert seed.CARD_FONT.exists()
+    assert seed._font(30).getname()[0] == "NanumGothic"
+
+
 def test_fake_card_is_valid_image():
     with Image.open(io.BytesIO(seed.fake_card("한빛정밀", "강민호", "010-0000-0000"))) as img:
         assert img.size == (900, 500)

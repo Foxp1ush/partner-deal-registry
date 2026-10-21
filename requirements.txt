@@ -1,6 +1,11 @@
+# Pinned to the versions tested locally (Python 3.13) so the cloud server behaves the same.
 streamlit==1.58.0
-starlette>=0.40,<1   # streamlit 1.58은 starlette 1.x와 맞지 않아 이미지·아이콘 파일 전송이 깨진다(엑박)
+# streamlit 1.58 breaks with starlette 1.x: images/icons fail to load (broken image).
+starlette==0.52.1
+uvicorn==0.54.0
 pandas==2.3.0
-pillow>=10       # 증빙 이미지 축소 (streamlit과 함께 설치되지만 직접 쓰므로 명시)
-anthropic>=1.0,<2
-pytest
+numpy==2.5.4
+# evidence image resize + demo business card
+pillow==12.3.0
+anthropic==1.15.0
+pytest==9.1.1

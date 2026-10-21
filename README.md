@@ -38,9 +38,11 @@ set ANTHROPIC_API_KEY=...        # 없으면 수동 입력 모드로 동작
 
 ## 배포 (Streamlit Community Cloud)
 1. 이 폴더를 본인 GitHub 저장소로 push
-2. share.streamlit.io → New app → `app.py` 선택
-3. Settings → Secrets에 `ANTHROPIC_API_KEY = "..."` 입력
-4. 데모 DB는 앱이 재시작되면 가상 데이터로 초기화된다
+2. share.streamlit.io → New app → `app.py` 선택, Advanced settings에서 **Python 3.13** (로컬과 같은 버전)
+3. (선택) Settings → Secrets에 `ANTHROPIC_API_KEY = "..."` 입력. 없으면 AI 기능만 꺼지고 나머지는 동작
+4. 데모 DB와 증빙 이미지는 앱이 재시작되면 가상 데이터로 초기화된다 (무료 서버는 파일을 보관하지 않음 — 실제 운영은 회사 자체 서버 전제)
+5. 패키지 버전은 `requirements.txt`에 모두 고정했다. 특히 `starlette`는 1.x로 올리면 이미지가 깨진다
+6. 시연용 명함의 한글은 `assets/fonts/NanumGothic-Regular.ttf`(OFL)로 그린다. 로그인 배경 이미지(`assets/login_bg.*`)는 저장소에 올리지 않아 서버에서는 배경 없이 보인다
 
 ## 구조
 - `matching.py` — 회사명 정규화, 사업자번호 검증, 중복 판정 (AI 없이 동작)

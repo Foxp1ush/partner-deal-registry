@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -26,14 +27,24 @@ def fake_biz_no(serial: int) -> str:
     return f"{d[:3]}-{d[3:5]}-{d[5:]}"
 
 
+# 프로젝트에 넣어 둔 한글 글꼴 (나눔고딕, OFL 라이선스). 리눅스 서버(Streamlit Cloud)에는 윈도우 글꼴이 없어서 함께 둔다.
+CARD_FONT = Path(__file__).parent / "assets" / "fonts" / "NanumGothic-Regular.ttf"
+
+
+def _font(size: int):
+    for f in (CARD_FONT, "malgun.ttf"):
+        try:
+            return ImageFont.truetype(str(f), size)
+        except OSError:
+            continue
+    return ImageFont.load_default()  # 한글이 깨질 수 있음
+
+
 def fake_card(company: str, name: str, phone: str) -> bytes:
-    """시연용 가상 명함 그림(PNG). 윈도우 한글 글꼴이 없으면 기본 글꼴로 그린다(한글이 깨질 수 있음)."""
+    """시연용 가상 명함 그림(PNG)."""
     img = Image.new("RGB", (900, 500), "white")
     d = ImageDraw.Draw(img)
-    try:
-        big, small = ImageFont.truetype("malgun.ttf", 52), ImageFont.truetype("malgun.ttf", 30)
-    except OSError:
-        big = small = ImageFont.load_default()
+    big, small = _font(52), _font(30)
     d.rectangle([20, 20, 880, 480], outline="#3182F6", width=6)
     d.text((70, 80), company, font=big, fill="#191F28")
     d.text((70, 220), f"{name}  |  생산기술팀", font=small, fill="#333D4B")

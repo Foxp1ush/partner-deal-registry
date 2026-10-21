@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import io
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -79,6 +80,13 @@ def list_for(registration_id: int, path: Path = DB_PATH) -> list[dict]:
     folder = evidence_dir(path)
     return [{**e, "file_path": folder / e["file"], "kind_label": KINDS[e["kind"]]}
             for e in db.list_evidence(registration_id, path=path)]
+
+
+def download_name(company_name: str, item: dict) -> str:
+    """내려받을 파일 이름. 예: '한빛정밀_명함_20261021-1717.jpg'. 파일 이름에 못 쓰는 글자는 뺀다."""
+    safe = re.sub(r'[\\/:*?"<>|]+', "", company_name).strip() or "고객사"
+    stamp = item["ts"][:16].replace("-", "").replace("T", "-").replace(":", "")
+    return f"{safe}_{item['kind_label']}_{stamp}.jpg"
 
 
 def summary(row: dict, kinds: set[str]) -> str:

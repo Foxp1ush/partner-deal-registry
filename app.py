@@ -62,7 +62,7 @@ def reg_table(rows: list[dict], show_partner: bool = True,
             "회사명": r["company_name"],
             "사업자번호": matching.format_biz_no(r["biz_no"]),
             "등록일": r["registered_at"][:10],
-            "만료일": r["expires_on"],  # 계약 고객은 계약 종료일
+            "만료일": r["expires_on"],  # 계약 고객은 유지보수 종료일
             # 숫자·빈칸이 섞이면 표에 90.0 / None처럼 보여서 글자로 표시
             "남은 일수": f"D-{days_left(r['expires_on'])}" if r["status"] in ("active", "won") else "-",
             "상태": STATUS_LABEL[r["status"]],
@@ -71,6 +71,8 @@ def reg_table(rows: list[dict], show_partner: bool = True,
         }
         if show_partner:
             item = {"파트너": r["partner_name"], **item}
+            item["ENCY 계정"] = ((r["ency_account"] + ("" if r["ency_issued_at"] else " (발급 대기)"))
+                                 if r["status"] == "won" and r["ency_account"] else "")  # 총판이 계정 발급에 씀
         else:  # 고객사별 영업 단계는 파트너 화면에만. 총판은 집계만 본다.
             item["영업 단계"] = r["stage"]
             item["예상 구매일"] = (r["expected_close"] + (" (지남)" if crm.is_overdue(r) else "")
@@ -83,15 +85,22 @@ def reg_table(rows: list[dict], show_partner: bool = True,
 
 
 def show_evidence(registration_id: int, add_as: str | None = None) -> None:
-    """등록 증빙 이미지를 보여 준다. add_as(계정 이름)를 주면 이미지를 추가로 올릴 수 있다."""
+    """등록 증빙 이미지를 보여 주고 내려받게 한다. add_as(계정 이름)를 주면 이미지를 추가로 올릴 수 있다.
+
+    파트너(자기 등록)와 총판 화면이 함께 쓴다. 다른 파트너는 이 함수를 부르는 화면에 들어올 수 없다.
+    """
     items = evidence.list_for(registration_id)
     if not items:
         st.caption("첨부된 증빙 이미지가 없습니다.")
+    reg = db.get_registration(registration_id)
     cols = st.columns(3)
     for i, e in enumerate(items):
         with cols[i % 3]:
             if e["file_path"].exists():
                 st.image(str(e["file_path"]), width="stretch")
+                st.download_button("⬇ 내려받기", e["file_path"].read_bytes(), mime="image/jpeg",
+                                   file_name=evidence.download_name(reg["company_name"] if reg else "", e),
+                                   key=f"dl_{registration_id}_{e['id']}")
             else:
                 st.warning("이미지 파일을 찾을 수 없습니다.")
             st.caption(f"{e['kind_label']} · {e['ts'][:16].replace('T', ' ')} · {e['uploader']}")
@@ -434,10 +443,11 @@ def my_tab(partner: dict) -> None:
                    + ", ".join(f"{r['company_name']}(D-{days_left(r['expires_on'])})" for r in soon))
     renew = [r for r in rows if r["status"] == "won" and days_left(r["expires_on"]) <= db.CONTRACT_ALERT_DAYS]
     if renew:
-        st.warning(f"계약이 {db.CONTRACT_ALERT_DAYS}일 안에 끝나는 계약 고객 {len(renew)}곳 — 갱신하지 않으면 종료일 다음 날 "
+        st.warning(f"유지보수가 {db.CONTRACT_ALERT_DAYS}일 안에 끝나는 계약 고객 {len(renew)}곳 — 연장하지 않으면 종료일 다음 날 "
                    "다른 파트너가 등록할 수 있습니다: "
                    + ", ".join(f"{r['company_name']}(D-{days_left(r['expires_on'])})" for r in renew))
-    st.caption("계약 고객은 90일이 아니라 계약 종료일까지 영업권이 유지됩니다. '영업 관리'에서 단계를 '수주'로 바꾸면 계약 고객이 됩니다.")
+    st.caption("계약 고객은 90일이 아니라 유지보수 종료일(라이선스 시작일 + 1년, 연장하면 늘어남)까지 영업권이 유지됩니다. "
+               "'영업 관리'에서 단계를 '수주'로 바꾸면 계약 고객이 됩니다.")
     st.dataframe(reg_table(rows, show_partner=False), hide_index=True, width="stretch")
     edit_section(partner, rows)
     with st.expander("📎 등록 증빙 이미지 (명함·사업자등록증)"):
@@ -476,8 +486,16 @@ def edit_section(partner: dict, rows: list[dict]) -> None:
             c1, c2 = st.columns(2)
             contact = c1.text_input("담당자", value=r["contact_name"])
             phone = c2.text_input("연락처", value=r["contact_phone"])
+            email = (st.text_input("고객사 ENCY 계정 이메일", value=r["ency_account"])
+                     if r["status"] == "won" else r["ency_account"])
             note = st.text_area("메모", value=r["note"], height=80)
             if not st.form_submit_button("저장", type="primary"):
+                return
+        if r["status"] == "won":
+            try:
+                email = crm.check_ency_account(email)
+            except crm.CrmError as e:
+                st.error(str(e))
                 return
         biz = biz.strip()
         if biz and not matching.is_valid_biz_no(biz):
@@ -492,16 +510,24 @@ def edit_section(partner: dict, rows: list[dict]) -> None:
             if msg := biz_no_conflict(rid, biz, partner["id"]):
                 st.error(f"저장할 수 없습니다. {msg}")
                 return
-        new = {"biz_no": biz, "contact_name": contact.strip(), "contact_phone": phone.strip(), "note": note.strip()}
+        new = {"biz_no": biz, "contact_name": contact.strip(), "contact_phone": phone.strip(), "note": note.strip(),
+               "ency_account": email}
         changed = {k: v for k, v in new.items() if v != r[k]}
         if not changed:
             st.info("바뀐 내용이 없습니다.")
             return
         db.update_registration(rid, changed)
-        labels = {"biz_no": "사업자번호", "contact_name": "담당자", "contact_phone": "연락처", "note": "메모"}
+        if "ency_account" in changed and r["ency_issued_at"]:
+            # 이메일이 바뀌면 새 이메일로 다시 발급해야 하므로 총판의 발급 대기 목록으로 되돌린다
+            db.update_registration(rid, {"ency_issued_at": ""}, allowed=db.ADMIN_EDITABLE)
+            db.log("ency_issued", partner["name"], rid,
+                   f"{r['company_name']} ENCY 계정 이메일 변경 → 다시 발급 대기 ({r['ency_account']}→{changed['ency_account']})")
+        labels = {"biz_no": "사업자번호", "contact_name": "담당자", "contact_phone": "연락처", "note": "메모",
+                  "ency_account": "ENCY 계정"}
         db.log("edit", partner["name"], rid,
                f"{r['company_name']} 수정: " + ", ".join(
-                   f"{labels[k]} '{r[k]}'→'{v}'" if k == "biz_no" else labels[k] for k, v in changed.items()))
+                   f"{labels[k]} '{r[k]}'→'{v}'" if k in ("biz_no", "ency_account") else labels[k]
+                   for k, v in changed.items()))
         st.session_state["flash_my"] = "수정했습니다."
         st.rerun()
 
@@ -549,17 +575,41 @@ def crm_tab(user: dict) -> None:
     def owner_name(u: str) -> str:
         return staff[u]["display_name"] or u if u in staff else "미지정"
 
+    # 고객사가 많아져도 찾기 쉽게: 검색어 + 단계로 좁힌 뒤 고른다
+    s1, s2 = st.columns([2, 1])
+    query = s1.text_input("🔍 고객사 검색", key="crm_query",
+                          placeholder="회사명, 사업자번호, 고객 담당자 이름·연락처로 검색")
+    stages = s2.multiselect("영업 단계", crm.STAGES, key="crm_stages", placeholder="전체 단계")
+    found = crm.search(list(rows.values()), query, stages)
+    if not found:
+        st.info("조건에 맞는 고객사가 없습니다. 검색어나 단계를 바꿔 보세요.")
+        return
+    if query or stages:
+        st.caption(f"{len(rows)}곳 중 {len(found)}곳")
     rid = st.selectbox(
-        "고객사", list(rows),
+        "고객사", [x["id"] for x in found], key="crm_pick",
         format_func=lambda i: f"{rows[i]['company_name']} · {rows[i]['stage']} · {STATUS_LABEL[rows[i]['status']]}"
                               + (f" · 담당 {owner_name(rows[i]['owner'])}" if crm.is_manager(user) else ""),
     )
     r = rows[rid]
-    until = "계약 종료" if r["status"] == "won" else "만료"
-    expected = f" · 예상 구매일 {r['expected_close']}" if r["stage"] in crm.FORECAST_STAGES and r["expected_close"] else ""
-    st.markdown(f"**{r['company_name']}** · 고객 담당자 {r['contact_name'] or '-'} · "
-                f"우리 담당 {owner_name(r['owner'])} · 영업권 {STATUS_LABEL[r['status']]}({until} {r['expires_on']})  \n"
-                f"영업 단계 **{r['stage']}**{expected}")
+    until = "유지보수 종료" if r["status"] == "won" else "만료"
+    expected = r["expected_close"] if r["stage"] in crm.FORECAST_STAGES and r["expected_close"] else ""
+    # 고객사 요약 카드: 회사명은 크게, 항목마다 작은 이름표(caption) + 값
+    with st.container(border=True):
+        st.markdown(f"#### {r['company_name']}")
+        k1, k2, k3, k4 = st.columns(4)
+        k1.caption("**고객 담당자**")
+        k1.markdown(r["contact_name"] or "-")
+        k2.caption("**담당 영업**")
+        k2.markdown(owner_name(r["owner"]))
+        k3.caption("**상태**")
+        k3.markdown(f"{STATUS_LABEL[r['status']]} · {until} {r['expires_on']}"
+                    + (f"  \nENCY 계정 {r['ency_account']} · "
+                       + (f":green-badge[발급 완료 {r['ency_issued_at'][:10]}]" if r["ency_issued_at"]
+                          else ":orange-badge[발급 대기]")
+                       if r["status"] == "won" and r["ency_account"] else ""))
+        k4.caption("**영업 단계**")
+        k4.markdown(f":blue-badge[{r['stage']}]" + (f"  \n예상 구매 {expected}" if expected else ""))
     if crm.is_overdue(r):
         st.warning("예상 구매일이 지났습니다. 단계나 예상 구매일을 다시 확인해 주세요.")
 
@@ -570,43 +620,51 @@ def crm_tab(user: dict) -> None:
     with c1, st.form(f"stage_{rid}"):
         stage = st.selectbox("영업 단계", crm.STAGES, index=crm.STAGES.index(r["stage"]),
                              format_func=lambda s: f"{s} — {crm.STAGE_GUIDE[s]}")
-        default_exp = (date.fromisoformat(r["expected_close"]) if r["expected_close"]
-                       and r["expected_close"] >= date.today().isoformat() else date.today() + timedelta(days=30))
-        expected_close = st.date_input("예상 구매일 ('구매 검토'·'구매 임박'일 때)", value=default_exp,
-                                       min_value=date.today())
-        contract_end = None
+        # 날짜 칸은 빈 채로 시작한다 (미리 채운 날짜를 실수로 저장하지 않게). 이미 저장된 예상 구매일만 채워 둔다.
+        saved_exp = (date.fromisoformat(r["expected_close"]) if r["expected_close"]
+                     and r["expected_close"] >= date.today().isoformat() else None)
+        expected_close = st.date_input("예상 구매일 ('구매 임박'은 필수입력)", value=saved_exp,
+                                       min_value=date.today(), format="YYYY-MM-DD")
+        license_start, ency_account = None, None
         if r["status"] != "won":
-            contract_end = st.date_input("계약 종료일 ('수주'로 바꿀 때)", value=date.today() + timedelta(days=365),
-                                         min_value=date.today() + timedelta(days=1),
-                                         max_value=date.today() + timedelta(days=db.CONTRACT_MAX_DAYS))
-            st.caption("수주하면 90일 보호 대신 계약 종료일까지 영업권이 유지됩니다.")
+            license_start = st.date_input("라이선스 시작일 (수주 시 필수 입력)", value=None,
+                                          format="YYYY-MM-DD")
+            ency_account = st.text_input("고객사 ENCY 계정 이메일 (수주 시 필수 입력)",
+                                         placeholder="cam@company.co.kr · 총판이 이 이메일로 ENCY 계정을 발급합니다")
+            st.caption(f"  ")
         if st.form_submit_button("단계 저장"):
             try:
-                crm.set_stage(user, rid, stage, contract_end=contract_end.isoformat() if contract_end else None,
-                              expected_close=expected_close.isoformat())
+                crm.set_stage(user, rid, stage,
+                              expected_close=expected_close.isoformat() if expected_close else None,
+                              license_start=license_start.isoformat() if license_start else None,
+                              ency_account=ency_account)
             except crm.CrmError as e:
                 st.error(str(e))
             else:
                 done = f"단계를 '{stage}'(으)로 저장했습니다."
                 if stage in crm.FORECAST_STAGES:
-                    done += f" 예상 구매일은 {expected_close}입니다."
+                    done += f" 예상 구매일은 {expected_close}입니다." if expected_close else " 예상 구매일은 비워 두었습니다."
                 if stage == "수주" and r["status"] != "won":
-                    done += f" 계약 종료일 {contract_end}까지 영업권이 유지됩니다."
+                    saved = db.get_registration(rid)
+                    done += (f" 라이선스 시작 {saved['license_start']}, 유지보수 종료일 {saved['expires_on']}까지 "
+                             f"영업권이 유지됩니다. ENCY 계정({saved['ency_account']}) 발급이 총판에 요청되었습니다.")
                 st.session_state["flash_crm"] = done
                 st.rerun()
     if r["status"] == "won":
         with c1, st.form(f"renew_{rid}"):
             exp = date.fromisoformat(r["expires_on"])
-            new_end = st.date_input("계약 갱신 — 새 계약 종료일", value=exp + timedelta(days=365),
+            st.markdown("**유지보수 연장** (유료 유지보수 1년 연장 시)")
+            new_end = st.date_input("새 유지보수 종료일", value=exp + timedelta(days=365),
                                     min_value=exp + timedelta(days=1),
-                                    max_value=date.today() + timedelta(days=db.CONTRACT_MAX_DAYS))
-            if st.form_submit_button("계약 갱신"):
+                                    max_value=date.today() + timedelta(days=db.CONTRACT_MAX_DAYS),
+                                    format="YYYY-MM-DD")
+            if st.form_submit_button("유지보수 연장"):
                 try:
                     end = crm.renew_contract(user, rid, new_end.isoformat())
                 except crm.CrmError as e:
                     st.error(str(e))
                 else:
-                    st.session_state["flash_crm"] = f"계약을 갱신했습니다. 계약 종료일 {end}까지 영업권이 유지됩니다."
+                    st.session_state["flash_crm"] = f"유지보수를 연장했습니다. {end}까지 영업권이 유지됩니다."
                     st.rerun()
     if crm.is_manager(user):
         active_staff = [u for u, s in staff.items() if s["active"]]
@@ -785,7 +843,8 @@ EVENT_LABEL = {"register": "등록", "pending": "검토 요청", "blocked": "등
                "reject": "반려", "expire": "만료", "ai_call": "AI 호출", "notice": "공지", "edit": "정보 수정",
                "release": "등록 해제", "extend": "기간 연장", "transfer": "이관", "rename": "회사명 수정",
                "restore": "반려 취소", "handover": "퇴사 인계", "account": "계정 관리",
-               "won": "수주(계약 고객)", "renew": "계약 갱신", "evidence": "증빙 첨부"}
+               "won": "수주(계약 고객)", "renew": "유지보수 연장", "evidence": "증빙 첨부",
+               "ency_issued": "ENCY 계정 발급"}
 
 
 def run_action(fn, done: str, *args, **kwargs):
@@ -814,12 +873,14 @@ def manage_tab() -> None:
     )
     r = rows[rid]
     own_ext, total_ext = admin.extension_counts().get(rid, (0, 0))
-    until = "계약 종료" if r["status"] == "won" else "만료"
+    until = "유지보수 종료" if r["status"] == "won" else "만료"
     st.markdown(
         f"**{r['company_name']}** · {r['partner_name']} · {STATUS_LABEL[r['status']]}  \n"
         f"사업자번호 {matching.format_biz_no(r['biz_no']) or '미기재'} · 등록 {r['registered_at'][:10]} · "
         f"{until} {r['expires_on']}  \n"
-        f"기간 연장: 이 등록 **{own_ext}회** · 이 고객사 누적 **{total_ext}회** (모든 파트너·재등록 포함)"
+        + (f"라이선스 시작 {r['license_start'] or '-'} · **ENCY 계정 {r['ency_account'] or '미입력'}**  \n"
+           if r["status"] == "won" else "")
+        + f"기간 연장: 이 등록 **{own_ext}회** · 이 고객사 누적 **{total_ext}회** (모든 파트너·재등록 포함)"
     )
     with st.expander(f"📎 등록 증빙 — {evidence.summary(r, db.evidence_kinds().get(rid, set()))}", expanded=True):
         show_evidence(rid)
@@ -830,7 +891,7 @@ def manage_tab() -> None:
 
     actions = {"active": ["기간 연장", "이관", "회사명 수정", "등록 해제"],
                "pending": ["회사명 수정", "등록 해제"],
-               "won": ["이관", "회사명 수정", "등록 해제"],  # 계약 고객은 계약 종료일로 보호 → 연장 대상 아님
+               "won": ["이관", "회사명 수정", "등록 해제"],  # 계약 고객은 유지보수 종료일로 보호 → 연장 대상 아님
                "rejected": ["반려 되돌리기"]}[status]
     action = st.radio("조치", actions, horizontal=True, key=f"act_{rid}")
 
@@ -842,7 +903,7 @@ def manage_tab() -> None:
             others = [p for p in db.list_partners() if p["id"] != r["partner_id"]]
             to = st.selectbox("받을 파트너", [p["id"] for p in others],
                               format_func=lambda i: next(p["name"] for p in others if p["id"] == i))
-            st.caption("보호 기간(계약 고객은 계약 종료일)은 그대로 유지합니다. 이전 파트너가 남긴 영업 기록은 "
+            st.caption("보호 기간(계약 고객은 유지보수 종료일)은 그대로 유지합니다. 이전 파트너가 남긴 영업 기록은 "
                        "새 파트너에게 보이지 않으며, 지우지 않고 분쟁 근거로 보존합니다.")
         elif action == "회사명 수정":
             new_name = st.text_input("새 회사명", value=r["company_name"])
@@ -964,38 +1025,88 @@ def partners_tab(user: dict) -> None:
                        flash_key="flash_partners")
 
 
+def ency_tab() -> None:
+    """ENCY 계정 발급 체크리스트: 수주 때 파트너가 적은 고객사 이메일로 계정을 만든 뒤 '발급 완료'를 누른다."""
+    if msg := st.session_state.pop("flash_ency", None):
+        st.success(msg)
+    waiting, done = admin.ency_queue()
+    st.caption("파트너가 수주 처리하며 입력한 고객사 이메일로 ENCY 계정을 만든 뒤 '발급 완료'를 눌러 주세요. "
+               "파트너 화면에도 발급 여부가 보입니다. 파트너가 이메일을 바꾸면 다시 '발급 대기'로 돌아옵니다.")
+    st.markdown(f"**발급 대기 {len(waiting)}건**")
+    if not waiting:
+        st.success("발급할 계정이 없습니다.")
+    for r in waiting:
+        with st.container(border=True):
+            c1, c2 = st.columns([4, 1])
+            c1.markdown(f"**{r['company_name']}** · {r['partner_name']}  \n"
+                        f"ENCY 계정 **`{r['ency_account']}`** · 라이선스 시작 {r['license_start'] or '-'} · "
+                        f"유지보수 종료 {r['expires_on']}")
+            if c2.button("발급 완료", key=f"ency_ok_{r['id']}", type="primary"):
+                try:
+                    admin.mark_ency_issued(r["id"])
+                except admin.ActionError as e:
+                    st.error(str(e))
+                else:
+                    st.session_state["flash_ency"] = f"{r['company_name']} ENCY 계정을 발급 완료로 표시했습니다."
+                    st.rerun()
+    with st.expander(f"발급 완료 {len(done)}건"):
+        if done:
+            st.dataframe(pd.DataFrame([{
+                "회사명": r["company_name"], "파트너": r["partner_name"], "ENCY 계정": r["ency_account"],
+                "발급일": r["ency_issued_at"][:10], "유지보수 종료": r["expires_on"],
+            } for r in done]), hide_index=True, width="stretch")
+            with st.form("ency_undo"):
+                st.markdown("**발급 표시 취소** (잘못 눌렀을 때)")
+                by_id = {r["id"]: r for r in done}
+                rid = st.selectbox("고객사", list(by_id),
+                                   format_func=lambda i: f"{by_id[i]['company_name']} · {by_id[i]['ency_account']}")
+                reason = st.text_input("사유 *")
+                if st.form_submit_button("취소"):
+                    try:
+                        admin.undo_ency_issued(rid, reason)
+                    except admin.ActionError as e:
+                        st.error(str(e))
+                    else:
+                        st.session_state["flash_ency"] = "발급 표시를 취소했습니다."
+                        st.rerun()
+
+
 def admin_view(user: dict) -> None:
-    tabs = st.tabs(["검토 대기", "등록 관리", "전체 현황", "만료 임박", "이력 로그", "공지 작성", "영업 현황", "파트너·계정"])
-    with tabs[6]:
-        pipeline_tab(user)
+    waiting = len(admin.ency_queue()[0])
+    tabs = st.tabs(["검토 대기", f"ENCY 계정 발급 ({waiting})" if waiting else "ENCY 계정 발급", "등록 관리", "전체 현황",
+                    "만료 임박", "이력 로그", "공지 작성", "영업 현황", "파트너·계정"])
     with tabs[7]:
+        pipeline_tab(user)
+    with tabs[8]:
         partners_tab(user)
     with tabs[0]:
         review_tab()
     with tabs[1]:
-        manage_tab()
+        ency_tab()
     with tabs[2]:
+        manage_tab()
+    with tabs[3]:
         rows = db.list_registrations()
         c = st.columns(6)
         for col, (label, s) in zip(c, [("보호 중", "active"), ("검토 대기", "pending"), ("계약 고객", "won"),
                                        ("만료", "expired"), ("반려", "rejected"), ("해제", "released")]):
             col.metric(label, sum(r["status"] == s for r in rows))
         st.dataframe(reg_table(rows, ext=admin.extension_counts()), hide_index=True, width="stretch")
-    with tabs[3]:
-        st.caption(f"보호 중은 {db.EXPIRING_SOON_DAYS}일 안, 계약 고객은 계약 종료 {db.CONTRACT_ALERT_DAYS}일 안에 끝나는 등록입니다.")
+    with tabs[4]:
+        st.caption(f"보호 중은 {db.EXPIRING_SOON_DAYS}일 안, 계약 고객은 유지보수 종료 {db.CONTRACT_ALERT_DAYS}일 안에 끝나는 등록입니다.")
         soon = db.expiring_soon()
         if soon:
             st.dataframe(reg_table(soon, ext=admin.extension_counts()), hide_index=True, width="stretch")
         else:
             st.info("곧 끝나는 등록이 없습니다.")
-    with tabs[4]:
+    with tabs[5]:
         st.caption("분쟁이 생기면 '누가 언제 등록했는지'를 이 기록으로 확인합니다.")
         ev = db.list_events()
         st.dataframe(pd.DataFrame([{
             "시각": e["ts"].replace("T", " "), "구분": EVENT_LABEL.get(e["kind"], e["kind"]),
             "파트너": e["partner"], "내용": e["detail"],
         } for e in ev]), hide_index=True, width="stretch")
-    with tabs[5]:
+    with tabs[6]:
         with st.form("notice", clear_on_submit=True):
             title = st.text_input("제목")
             body = st.text_area("내용")

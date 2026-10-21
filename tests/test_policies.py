@@ -34,28 +34,89 @@ def status(path, rid):
     return db.get_registration(rid, path=path)["status"]
 
 
+def won(start: int = 0, email: str = "cam@satbyeol.example") -> dict:
+    """수주 필수 정보: 라이선스 시작일(오늘부터 start일 뒤), 고객사 ENCY 계정 이메일."""
+    return {"license_start": in_days(start), "ency_account": email}
+
+
 # ---- ① 수주 후 계약 기간 동안 보호 -------------------------------------------
 
 def test_won_holds_until_contract_end(env):
     path, u, a, b, r1 = env
-    crm.set_stage(u["a-1"], r1, "수주", contract_end=in_days(365), path=path)
+    crm.set_stage(u["a-1"], r1, "수주", **won(), contract_end=in_days(365), path=path)
     reg = db.get_registration(r1, path=path)
     assert reg["status"] == "won" and reg["expires_on"] == in_days(365)
     # 다른 파트너는 여전히 같은 회사로 막힌다
     found = matching.find_conflicts("(주)샛별정밀", "", db.holding_registrations(path=path))
     assert found["exact"]
     assert any(e["kind"] == "won" for e in db.list_events(path=path))
-    assert "계약 종료일" in crm.timeline(u["a-1"], r1, path=path)[0]["note"]
+    assert "유지보수 종료일" in crm.timeline(u["a-1"], r1, path=path)[0]["note"]
+
+
+def test_won_from_license_start(env):
+    # ENCY: 라이선스 시작일 + 1년(무상 유지보수)까지 보호. ENCY 계정 이메일도 함께 저장
+    path, u, a, b, r1 = env
+    crm.set_stage(u["a-1"], r1, "수주", **won(), path=path)
+    reg = db.get_registration(r1, path=path)
+    assert reg["status"] == "won" and reg["license_start"] == in_days(0) and reg["expires_on"] == in_days(365)
+    assert reg["ency_account"] == "cam@satbyeol.example"
+    assert "cam@satbyeol.example" in next(e for e in db.list_events(path=path) if e["kind"] == "won")["detail"]
+
+
+def test_won_requires_license_start_and_email(env):
+    path, u, a, b, r1 = env
+    with pytest.raises(crm.CrmError, match="라이선스 시작일"):
+        crm.set_stage(u["a-1"], r1, "수주", ency_account="cam@satbyeol.example", path=path)
+    with pytest.raises(crm.CrmError, match="ENCY 계정 이메일"):
+        crm.set_stage(u["a-1"], r1, "수주", license_start=in_days(0), path=path)
+    for bad in ("cam", "cam@", "cam@satbyeol", "c am@satbyeol.example"):
+        with pytest.raises(crm.CrmError, match="형식"):
+            crm.set_stage(u["a-1"], r1, "수주", **won(email=bad), path=path)
+    assert status(path, r1) == "active"
+
+
+def test_ency_issue_checklist(env):
+    path, u, a, b, r1 = env
+    assert admin.ency_queue(path=path) == ([], [])
+    with pytest.raises(admin.ActionError):
+        admin.mark_ency_issued(r1, path=path)  # 아직 수주 전
+    crm.set_stage(u["a-1"], r1, "수주", **won(), path=path)
+    waiting, done = admin.ency_queue(path=path)
+    assert [r["id"] for r in waiting] == [r1] and done == []
+    admin.mark_ency_issued(r1, path=path)
+    waiting, done = admin.ency_queue(path=path)
+    assert waiting == [] and [r["id"] for r in done] == [r1] and done[0]["ency_issued_at"]
+    with pytest.raises(admin.ActionError):
+        admin.mark_ency_issued(r1, path=path)  # 두 번 누를 수 없음
+    with pytest.raises(admin.ActionError):
+        admin.undo_ency_issued(r1, "  ", path=path)  # 취소는 사유 필수
+    admin.undo_ency_issued(r1, "다른 고객사로 잘못 표시", path=path)
+    assert [r["id"] for r in admin.ency_queue(path=path)[0]] == [r1]
+    assert sum(e["kind"] == "ency_issued" for e in db.list_events(path=path)) == 2
+
+
+def test_won_license_start_later_than_contract(env):
+    # 계약일과 라이선스 시작일이 다를 수 있다: 두 달 뒤 시작 → 그로부터 1년
+    path, u, a, b, r1 = env
+    crm.set_stage(u["a-1"], r1, "수주", **won(60), path=path)
+    reg = db.get_registration(r1, path=path)
+    assert reg["license_start"] == in_days(60) and reg["expires_on"] == in_days(425)
+
+
+def test_won_license_start_too_old(env):
+    # 무상 유지보수 1년이 이미 지난 시작일은 막는다
+    path, u, a, b, r1 = env
+    with pytest.raises(crm.CrmError, match="이미 지났습니다"):
+        crm.set_stage(u["a-1"], r1, "수주", **won(-400), path=path)
+    assert status(path, r1) == "active"
 
 
 def test_won_needs_valid_contract_end(env):
     path, u, a, b, r1 = env
     with pytest.raises(crm.CrmError):
-        crm.set_stage(u["a-1"], r1, "수주", path=path)  # 종료일 없음
+        crm.set_stage(u["a-1"], r1, "수주", **won(), contract_end=date.today().isoformat(), path=path)
     with pytest.raises(crm.CrmError):
-        crm.set_stage(u["a-1"], r1, "수주", contract_end=date.today().isoformat(), path=path)
-    with pytest.raises(crm.CrmError):
-        crm.set_stage(u["a-1"], r1, "수주", contract_end=in_days(db.CONTRACT_MAX_DAYS + 1), path=path)
+        crm.set_stage(u["a-1"], r1, "수주", **won(), contract_end=in_days(db.CONTRACT_MAX_DAYS + 1), path=path)
     assert status(path, r1) == "active"
     crm.set_stage(u["a-1"], r1, "견적·데모", path=path)  # 다른 단계는 종료일이 필요 없다
     assert status(path, r1) == "active"
@@ -65,14 +126,14 @@ def test_pending_cannot_be_won(env):
     path, u, a, b, r1 = env
     db.set_status(r1, "pending", path=path)
     with pytest.raises(crm.CrmError):
-        crm.set_stage(u["a-1"], r1, "수주", contract_end=in_days(30), path=path)
+        crm.set_stage(u["a-1"], r1, "수주", **won(), contract_end=in_days(30), path=path)
 
 
 def test_renew_extends_contract(env):
     path, u, a, b, r1 = env
     with pytest.raises(crm.CrmError):
         crm.renew_contract(u["a-1"], r1, in_days(400), path=path)  # 아직 계약 고객 아님
-    crm.set_stage(u["a-1"], r1, "수주", contract_end=in_days(30), path=path)
+    crm.set_stage(u["a-1"], r1, "수주", **won(), contract_end=in_days(30), path=path)
     with pytest.raises(crm.CrmError):
         crm.renew_contract(u["a-1"], r1, in_days(20), path=path)  # 지금보다 앞당길 수 없음
     assert crm.renew_contract(u["a-1"], r1, in_days(395), path=path) == in_days(395)
@@ -84,16 +145,16 @@ def test_renew_extends_contract(env):
 
 def test_won_expires_after_contract_end(env):
     path, u, a, b, r1 = env
-    crm.set_stage(u["a-1"], r1, "수주", contract_end=in_days(30), path=path)
+    crm.set_stage(u["a-1"], r1, "수주", **won(), contract_end=in_days(30), path=path)
     db.update_registration(r1, {"expires_on": in_days(-1)}, allowed=db.ADMIN_EDITABLE, path=path)
     assert db.expire_overdue(path=path) == 1
     assert status(path, r1) == "expired"
-    assert "계약 종료일 경과" in db.list_events(path=path)[0]["detail"]
+    assert "유지보수 종료일 경과" in db.list_events(path=path)[0]["detail"]
 
 
 def test_won_alert_window(env):
     path, u, a, b, r1 = env
-    crm.set_stage(u["a-1"], r1, "수주", contract_end=in_days(45), path=path)
+    crm.set_stage(u["a-1"], r1, "수주", **won(), contract_end=in_days(45), path=path)
     assert [r["id"] for r in db.expiring_soon(path=path)] == [r1]  # 계약 고객은 60일 안이면 알림
     crm.renew_contract(u["a-1"], r1, in_days(400), path=path)
     assert db.expiring_soon(path=path) == []
@@ -101,7 +162,7 @@ def test_won_alert_window(env):
 
 def test_admin_actions_on_won(env):
     path, u, a, b, r1 = env
-    crm.set_stage(u["a-1"], r1, "수주", contract_end=in_days(200), path=path)
+    crm.set_stage(u["a-1"], r1, "수주", **won(), contract_end=in_days(200), path=path)
     with pytest.raises(admin.ActionError):
         admin.extend(r1, 30, "연장", path=path)  # 계약 고객은 연장 대상 아님
     admin.transfer(r1, b, "고객 요청", path=path)
@@ -113,7 +174,7 @@ def test_admin_actions_on_won(env):
 
 def test_end_contract_releases_won(env):
     path, u, a, b, r1 = env
-    crm.set_stage(u["a-1"], r1, "수주", contract_end=in_days(200), path=path)
+    crm.set_stage(u["a-1"], r1, "수주", **won(), contract_end=in_days(200), path=path)
     db.add_account("boss", auth.hash_password("pw"), "admin", path=path)
     assert accounts.end_contract(auth.login("boss", "pw", path=path), a, "계약 종료", True, path=path) == 1
     assert status(path, r1) == "released"

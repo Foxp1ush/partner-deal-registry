@@ -78,6 +78,16 @@ def test_summary_and_kinds(env):
     assert evidence.summary({**row, "biz_no": seed.fake_biz_no(1)}, kinds | {"cert"}) == "사업자번호 · 명함 · 사업자등록증"
 
 
+def test_download_name(env):
+    path, rid = env
+    evidence.save(rid, "card", photo(100, 100), "a-1", path=path)
+    item = evidence.list_for(rid, path=path)[0]
+    name = evidence.download_name('(주)한빛/정밀:*', item)
+    assert name.startswith("(주)한빛정밀_명함_") and name.endswith(".jpg")
+    assert not any(c in name for c in '\\/:*?"<>|')
+    assert evidence.download_name("", item).startswith("고객사_명함_")
+
+
 def test_card_font_is_bundled():
     # 리눅스 서버에서도 한글 명함이 깨지지 않도록 글꼴 파일이 저장소에 있어야 한다
     assert seed.CARD_FONT.exists()

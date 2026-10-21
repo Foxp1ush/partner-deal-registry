@@ -10,8 +10,8 @@ from pathlib import Path
 DB_PATH = Path(__file__).resolve().parent / "data" / "registry.db"
 PROTECTION_DAYS = 90
 EXPIRING_SOON_DAYS = 14
-CONTRACT_ALERT_DAYS = 60   # 계약 고객: 계약 종료 60일 전부터 갱신 알림
-CONTRACT_MAX_DAYS = 365 * 3  # 계약 고객 보호는 최대 3년 (무기한 선점 방지)
+CONTRACT_ALERT_DAYS = 60   # 계약 고객: 유지보수 종료 60일 전부터 연장 영업 알림
+CONTRACT_MAX_DAYS = 365 * 3  # 계약 고객 보호는 오늘부터 최대 3년 (무기한 선점 방지)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS partners (
@@ -28,12 +28,15 @@ CREATE TABLE IF NOT EXISTS registrations (
     contact_phone TEXT NOT NULL DEFAULT '',
     note TEXT NOT NULL DEFAULT '',
     registered_at TEXT NOT NULL,      -- ISO datetime, 선점 기준 시각
-    expires_on TEXT NOT NULL,         -- ISO date. 계약 고객(won)은 계약 종료일
+    expires_on TEXT NOT NULL,         -- ISO date. 계약 고객(won)은 유지보수 종료일
     status TEXT NOT NULL,             -- active | pending | won(계약 고객) | expired | rejected | released
     review_reason TEXT NOT NULL DEFAULT '',
     owner TEXT NOT NULL DEFAULT '',   -- 담당 직원 계정(username). 비어 있으면 파트너 관리자만 봄
     stage TEXT NOT NULL DEFAULT '명함 확보',  -- CRM 영업 단계 (crm.STAGES)
-    expected_close TEXT NOT NULL DEFAULT ''  -- 예상 구매일(ISO date). '구매 검토'·'구매 임박'일 때만
+    expected_close TEXT NOT NULL DEFAULT '',  -- 예상 구매일(ISO date). '구매 검토'(선택)·'구매 임박'(필수)일 때만
+    license_start TEXT NOT NULL DEFAULT '',   -- 라이선스 시작일. 수주 시 필수 (유지보수 종료일 = 시작일 + 1년)
+    ency_account TEXT NOT NULL DEFAULT '',    -- 고객사 ENCY 계정 이메일. 수주 시 필수, 총판이 이 이메일로 계정 발급
+    ency_issued_at TEXT NOT NULL DEFAULT ''   -- 총판이 ENCY 계정을 발급한 시각. 비어 있으면 발급 대기
 );
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY,
@@ -114,7 +117,8 @@ def connect(path: Path = DB_PATH):
 # 예전 DB 파일에 없는 열을 채워 넣는다 (CREATE TABLE IF NOT EXISTS는 기존 테이블을 바꾸지 않으므로)
 _ADDED_COLUMNS = {
     "registrations": [("owner", "TEXT NOT NULL DEFAULT ''"), ("stage", "TEXT NOT NULL DEFAULT '명함 확보'"),
-                      ("expected_close", "TEXT NOT NULL DEFAULT ''")],
+                      ("expected_close", "TEXT NOT NULL DEFAULT ''"), ("license_start", "TEXT NOT NULL DEFAULT ''"),
+                      ("ency_account", "TEXT NOT NULL DEFAULT ''"), ("ency_issued_at", "TEXT NOT NULL DEFAULT ''")],
     "accounts": [("display_name", "TEXT NOT NULL DEFAULT ''"),
                  ("partner_role", "TEXT NOT NULL DEFAULT 'manager'"),
                  ("active", "INTEGER NOT NULL DEFAULT 1"),
@@ -263,7 +267,7 @@ def expire_overdue(path: Path = DB_PATH) -> int:
         ).fetchall()
         for r in rows:
             c.execute("UPDATE registrations SET status='expired' WHERE id=?", (r["id"],))
-            what = "계약 종료일 경과(갱신 기록 없음)" if r["status"] == "won" else "보호기간 만료"
+            what = "유지보수 종료일 경과(연장 기록 없음)" if r["status"] == "won" else "보호기간 만료"
             c.execute(
                 "INSERT INTO events(ts, kind, partner, registration_id, detail) VALUES (?,?,?,?,?)",
                 (now_iso(), "expire", r["partner_name"], r["id"], f"{r['company_name']} {what}"),
@@ -320,8 +324,9 @@ def add_registration(partner_id: int, company_name: str, biz_no: str, contact_na
         ).lastrowid
 
 
-_EDITABLE = ("biz_no", "contact_name", "contact_phone", "note")
-ADMIN_EDITABLE = _EDITABLE + ("company_name", "partner_id", "expires_on", "status", "owner", "stage", "expected_close")
+_EDITABLE = ("biz_no", "contact_name", "contact_phone", "note", "ency_account")
+ADMIN_EDITABLE = _EDITABLE + ("company_name", "partner_id", "expires_on", "status", "owner", "stage", "expected_close",
+                                "license_start", "ency_issued_at")
 
 
 def get_registration(registration_id: int, path: Path = DB_PATH) -> dict | None:

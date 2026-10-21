@@ -37,7 +37,10 @@ def test_new_registration_starts_at_stage_0(env):
 def test_forecast_stages_need_expected_close(env):
     path, user, r1 = env
     with pytest.raises(crm.CrmError):
-        crm.set_stage(user, r1, "구매 검토", path=path)  # 예상 구매일 없음
+        crm.set_stage(user, r1, "구매 임박", path=path)  # '구매 임박'은 예상 구매일 필수
+    crm.set_stage(user, r1, "구매 검토", path=path)        # '구매 검토'는 비워도 된다
+    assert db.get_registration(r1, path=path)["stage"] == "구매 검토"
+    assert db.get_registration(r1, path=path)["expected_close"] == ""
     with pytest.raises(crm.CrmError):
         crm.set_stage(user, r1, "구매 임박", expected_close=in_days(60), path=path)  # 1개월 넘음
     crm.set_stage(user, r1, "구매 검토", expected_close=in_days(60), path=path)
@@ -58,7 +61,37 @@ def test_forecast_and_overdue(env):
     db.update_registration(r1, {"expected_close": in_days(-3)}, allowed=db.ADMIN_EDITABLE, path=path)
     reg = db.get_registration(r1, path=path)
     assert crm.is_overdue(reg)
-    assert crm.forecast(path=path)["A"] == {"1개월 안 (Stage 4)": 0, "3개월 안 (Stage 3)": 0, "예상일 지남": 1}
+    assert crm.forecast(path=path)["A"] == {"1개월 안 (Stage 4)": 0, "3개월 안 (Stage 3)": 0,
+                                            "시기 미정 (Stage 3)": 0, "예상일 지남": 1}
+
+
+def test_forecast_undated_review(env):
+    path, user, r1 = env
+    crm.set_stage(user, r1, "구매 검토", path=path)
+    assert crm.forecast(path=path)["A"]["시기 미정 (Stage 3)"] == 1
+    crm.set_stage(user, r1, "구매 검토", expected_close=in_days(40), path=path)  # 나중에 날짜를 채움
+    assert crm.forecast(path=path)["A"]["3개월 안 (Stage 3)"] == 1
+
+
+def test_search_customers():
+    rows = [
+        {"company_name": "(주)샛별정밀", "biz_no": "000-01-00012", "contact_name": "김하늘",
+         "contact_phone": "010-0000-1001", "stage": "견적·데모"},
+        {"company_name": "한빛정밀", "biz_no": "", "contact_name": "강민호",
+         "contact_phone": "010-0000-1009", "stage": "명함 확보"},
+        {"company_name": "누리금속 주식회사", "biz_no": "000-01-00026", "contact_name": "이도윤",
+         "contact_phone": "010-0000-1002", "stage": "구매 임박"},
+    ]
+    names = lambda q="", s=None: [r["company_name"] for r in crm.search(rows, q, s)]
+    assert len(names()) == 3
+    assert names("샛별 정밀") == ["(주)샛별정밀"]          # 띄어쓰기·법인 표기 무시
+    assert names("정밀") == ["(주)샛별정밀", "한빛정밀"]
+    assert names("00026") == ["누리금속 주식회사"]           # 사업자번호 일부
+    assert names("1009") == ["한빛정밀"]                    # 연락처 일부
+    assert names("강민호") == ["한빛정밀"]                  # 고객 담당자
+    assert names("정밀", ["명함 확보"]) == ["한빛정밀"]      # 검색어 + 단계
+    assert names("", ["구매 임박"]) == ["누리금속 주식회사"]
+    assert names("없는회사") == []
 
 
 def test_old_stage_names_are_migrated(tmp_path):

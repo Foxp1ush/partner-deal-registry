@@ -120,6 +120,38 @@ def rename(registration_id: int, new_name: str, reason: str, confirm_similar: bo
     return []
 
 
+# ---- ENCY 계정 발급 -------------------------------------------------------
+# 수주 때 파트너가 적은 고객사 이메일로 총판이 ENCY 계정을 만든 뒤 '발급 완료'로 표시한다.
+# 파트너가 이메일을 바꾸면 발급 표시는 지워진다(새 이메일로 다시 발급해야 하므로) — app.py edit_section.
+
+def ency_queue(path: Path = DB_PATH) -> tuple[list[dict], list[dict]]:
+    """(발급 대기, 발급 완료) 계약 고객 목록. 대기는 수주가 오래된 순, 완료는 최근 발급 순."""
+    won = [r for r in db.list_registrations(statuses=("won",), path=path) if r["ency_account"]]
+    waiting = sorted((r for r in won if not r["ency_issued_at"]), key=lambda r: r["license_start"] or r["registered_at"])
+    done = sorted((r for r in won if r["ency_issued_at"]), key=lambda r: r["ency_issued_at"], reverse=True)
+    return waiting, done
+
+
+def mark_ency_issued(registration_id: int, path: Path = DB_PATH) -> None:
+    row = _load(registration_id, ("won",), path)
+    if not row["ency_account"]:
+        raise ActionError("ENCY 계정 이메일이 없습니다. 파트너에게 이메일 입력을 요청해 주세요.")
+    if row["ency_issued_at"]:
+        raise ActionError("이미 발급 완료로 표시된 계정입니다.")
+    _save(row, {"ency_issued_at": db.now_iso()}, "ency_issued",
+          f"{row['company_name']} ENCY 계정 발급 완료 ({row['ency_account']})", path=path)
+
+
+def undo_ency_issued(registration_id: int, reason: str, path: Path = DB_PATH) -> None:
+    """잘못 누른 '발급 완료'를 되돌린다. 사유를 남긴다."""
+    row = _load(registration_id, ("won",), path)
+    reason = _need_reason(reason)
+    if not row["ency_issued_at"]:
+        raise ActionError("아직 발급 완료로 표시되지 않은 계정입니다.")
+    _save(row, {"ency_issued_at": ""}, "ency_issued",
+          f"{row['company_name']} ENCY 계정 발급 표시 취소 ({row['ency_account']}) — {reason}", path=path)
+
+
 def _same_customer(a: dict, b: dict) -> bool:
     na, nb = matching.normalize_biz_no(a["biz_no"]), matching.normalize_biz_no(b["biz_no"])
     return bool(na and na == nb) or matching.normalize_name(a["company_name"]) == matching.normalize_name(b["company_name"])

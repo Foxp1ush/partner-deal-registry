@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import io
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -110,7 +110,9 @@ NOTICES = [
     ("영업권 등록 정책 안내",
      "고객사 명함 또는 사업자등록증을 등록한 시점부터 90일간 해당 고객사의 영업권이 보호됩니다.\n"
      "같은 회사로 보이는 등록이 이미 있으면 총판 관리자가 확인 후 승인합니다.\n"
-     "수주한 고객은 계약 종료일까지(최대 3년) 영업권이 유지되며, 계약을 갱신하면 종료일이 늘어납니다.\n"
+     "수주한 고객은 유지보수 종료일(라이선스 시작일 + 1년 무상 유지보수)까지 영업권이 유지되며, "
+     "유지보수를 연장하면 종료일이 늘어납니다. 수주 처리 시 라이선스 시작일과 고객사 ENCY 계정 이메일을 꼭 입력해 주세요"
+     "(총판이 그 이메일로 ENCY 계정을 발급합니다).\n"
      "고객이 다른 파트너로 이관되어도 이전 파트너의 영업 기록은 새 파트너에게 공개되지 않습니다.\n"
      "등록하려면 사업자등록번호·명함 이미지·사업자등록증 이미지 중 하나가 꼭 필요합니다. "
      "첨부한 이미지는 등록 증빙으로 보관되며(삭제되지 않음) 총판이 언제든 확인할 수 있습니다."),
@@ -169,7 +171,10 @@ def seed() -> None:
         rid, _ = keys[key]
         reg = db.get_registration(rid)
         end = (now + timedelta(days=days_left)).date().isoformat()
-        db.update_registration(rid, {"status": "won", "expires_on": end}, allowed=db.ADMIN_EDITABLE)
+        start = (date.fromisoformat(end) - timedelta(days=365)).isoformat()  # 유지보수 종료일 = 라이선스 시작일 + 1년
+        db.update_registration(rid, {"status": "won", "expires_on": end, "license_start": start,
+                                     "ency_account": f"cam@{key}-demo.example"},  # 가상 이메일 (.example은 실재하지 않는 도메인)
+                               allowed=db.ADMIN_EDITABLE)
         db.log("won", reg["partner_name"], rid, f"{reg['company_name']} 수주 — 계약 종료일 {end}까지 보호",
                ts=(now - timedelta(days=won_days_ago)).isoformat(timespec="seconds"))
     for key, days_ahead in EXPECTED:

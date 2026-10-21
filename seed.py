@@ -5,11 +5,15 @@
 
 from __future__ import annotations
 
+import io
 from datetime import datetime, timedelta
+
+from PIL import Image, ImageDraw, ImageFont
 
 import admin
 import auth
 import db
+import evidence
 
 
 def fake_biz_no(serial: int) -> str:
@@ -20,6 +24,24 @@ def fake_biz_no(serial: int) -> str:
     check = (10 - total % 10) % 10
     d = body + str(check)
     return f"{d[:3]}-{d[3:5]}-{d[5:]}"
+
+
+def fake_card(company: str, name: str, phone: str) -> bytes:
+    """시연용 가상 명함 그림(PNG). 윈도우 한글 글꼴이 없으면 기본 글꼴로 그린다(한글이 깨질 수 있음)."""
+    img = Image.new("RGB", (900, 500), "white")
+    d = ImageDraw.Draw(img)
+    try:
+        big, small = ImageFont.truetype("malgun.ttf", 52), ImageFont.truetype("malgun.ttf", 30)
+    except OSError:
+        big = small = ImageFont.load_default()
+    d.rectangle([20, 20, 880, 480], outline="#3182F6", width=6)
+    d.text((70, 80), company, font=big, fill="#191F28")
+    d.text((70, 220), f"{name}  |  생산기술팀", font=small, fill="#333D4B")
+    d.text((70, 280), f"M. {phone}", font=small, fill="#333D4B")
+    d.text((70, 400), "가상 명함 (시연용 데이터)", font=small, fill="#8B95A1")
+    out = io.BytesIO()
+    img.save(out, "PNG")
+    return out.getvalue()
 
 
 PARTNERS = ["A파트너스", "B테크", "C엔지니어링"]
@@ -36,7 +58,12 @@ REGISTRATIONS = [
     ("dasom", "C엔지니어링", "다솜기공", 10005, "정민재", "010-0000-1005", 5, "c-sales1", "명함 확보"),
     ("saeum", "C엔지니어링", "새움산업(주)", 10006, "한지우", "010-0000-1006", 95, "c-sales2", "실패"),  # 만료 예정 데이터
     ("gaon", "B테크", "가온기계(주)", 10008, "윤가온", "010-0000-1008", 320, "b-sales1", "수주"),
+    # 사업자번호 없이 명함만으로 등록한 고객 (serial None)
+    ("hanbit", "C엔지니어링", "한빛정밀", None, "강민호", "010-0000-1009", 3, "c-sales1", "명함 확보"),
 ]
+
+# 시연용 증빙 이미지: (등록 키, 종류). 가상 명함 그림을 만들어 붙인다.
+EVIDENCE = [("hanbit", "card"), ("sat", "card")]
 
 # 계약 고객: (등록 키, 수주 며칠 전, 계약 종료까지 남은 일수). 갱신 알림(60일) 안에 들도록 둔다.
 WON = [("gaon", 300, 45)]
@@ -73,7 +100,9 @@ NOTICES = [
      "고객사 명함 또는 사업자등록증을 등록한 시점부터 90일간 해당 고객사의 영업권이 보호됩니다.\n"
      "같은 회사로 보이는 등록이 이미 있으면 총판 관리자가 확인 후 승인합니다.\n"
      "수주한 고객은 계약 종료일까지(최대 3년) 영업권이 유지되며, 계약을 갱신하면 종료일이 늘어납니다.\n"
-     "고객이 다른 파트너로 이관되어도 이전 파트너의 영업 기록은 새 파트너에게 공개되지 않습니다."),
+     "고객이 다른 파트너로 이관되어도 이전 파트너의 영업 기록은 새 파트너에게 공개되지 않습니다.\n"
+     "등록하려면 사업자등록번호·명함 이미지·사업자등록증 이미지 중 하나가 꼭 필요합니다. "
+     "첨부한 이미지는 등록 증빙으로 보관되며(삭제되지 않음) 총판이 언제든 확인할 수 있습니다."),
     ("영업 관리(CRM) 이용 안내",
      "영업 기록은 우리 회사 직원만 봅니다. 총판은 단계별 건수만 보며, 분쟁 등으로 상세를 열람하면 "
      "'총판 열람 기록'에 사유와 함께 공개됩니다. 단가·할인율 등 민감한 내용은 적지 마세요."),
@@ -115,7 +144,7 @@ def seed() -> None:
     keys = {}
     for key, partner, company, serial, contact, phone, days_ago, owner, stage in REGISTRATIONS:
         reg_at = (now - timedelta(days=days_ago)).replace(microsecond=0)
-        rid = db.add_registration(ids[partner], company, fake_biz_no(serial), contact, phone,
+        rid = db.add_registration(ids[partner], company, fake_biz_no(serial) if serial else "", contact, phone,
                                   "", "active", registered_at=reg_at, owner=owner)
         db.update_registration(rid, {"stage": stage}, allowed=db.ADMIN_EDITABLE)
         db.log("register", partner, rid, f"{company} 등록", ts=reg_at.isoformat())
@@ -137,6 +166,10 @@ def seed() -> None:
                                allowed=db.ADMIN_EDITABLE)
     for key, days, reason in EXTENSIONS:
         admin.extend(keys[key][0], days, reason)
+    by_key = {r[0]: r for r in REGISTRATIONS}
+    for key, kind in EVIDENCE:
+        _, _, company, _, contact, phone, _, owner, _ = by_key[key]
+        evidence.save(keys[key][0], kind, fake_card(company, contact, phone), owner)
     for i, (title, body) in enumerate(NOTICES):
         db.add_notice(title, body, ts=(now - timedelta(days=30 - i)).isoformat(timespec="seconds"))
     db.expire_overdue()

@@ -76,6 +76,16 @@ CREATE TABLE IF NOT EXISTS access_log (
     registration_id INTEGER NOT NULL,
     reason TEXT NOT NULL
 );
+-- 등록 증빙 이미지(명함·사업자등록증). 파일은 data/evidence/에 두고 여기엔 파일 이름만. 지우지 않는다.
+CREATE TABLE IF NOT EXISTS evidence (
+    id INTEGER PRIMARY KEY,
+    registration_id INTEGER NOT NULL REFERENCES registrations(id),
+    kind TEXT NOT NULL,               -- card(명함) | cert(사업자등록증)
+    file TEXT NOT NULL,
+    bytes INTEGER NOT NULL,
+    uploader TEXT NOT NULL,
+    ts TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS notices (
     id INTEGER PRIMARY KEY,
     ts TEXT NOT NULL,
@@ -375,6 +385,32 @@ def list_access_log(partner_id: int, path: Path = DB_PATH) -> list[dict]:
         return [dict(r) for r in c.execute(
             "SELECT l.*, r.company_name FROM access_log l JOIN registrations r ON r.id = l.registration_id "
             "WHERE l.partner_id=? ORDER BY l.ts DESC, l.id DESC", (partner_id,))]
+
+
+# ---- 등록 증빙 ----------------------------------------------------------
+
+def add_evidence(registration_id: int, kind: str, file: str, size: int, uploader: str,
+                 path: Path = DB_PATH) -> int:
+    with connect(path) as c:
+        return c.execute(
+            "INSERT INTO evidence(registration_id, kind, file, bytes, uploader, ts) VALUES (?,?,?,?,?,?)",
+            (registration_id, kind, file, size, uploader, now_iso()),
+        ).lastrowid
+
+
+def list_evidence(registration_id: int, path: Path = DB_PATH) -> list[dict]:
+    with connect(path) as c:
+        return [dict(r) for r in c.execute(
+            "SELECT * FROM evidence WHERE registration_id=? ORDER BY ts, id", (registration_id,))]
+
+
+def evidence_kinds(path: Path = DB_PATH) -> dict[int, set[str]]:
+    """등록 id → 첨부된 증빙 종류 집합 (표에 증빙 수준을 보여 줄 때)."""
+    out: dict[int, set[str]] = {}
+    with connect(path) as c:
+        for r in c.execute("SELECT registration_id, kind FROM evidence"):
+            out.setdefault(r[0], set()).add(r[1])
+    return out
 
 
 # ---- 공지 ---------------------------------------------------------------

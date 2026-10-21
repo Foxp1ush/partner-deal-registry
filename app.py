@@ -9,8 +9,10 @@
 
 from __future__ import annotations
 
+import base64
 import os
 from datetime import date, timedelta
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -21,6 +23,7 @@ import ai_extract
 import auth
 import crm
 import db
+import evidence
 import matching
 import seed
 
@@ -30,7 +33,9 @@ STATUS_LABEL = {"active": "보호 중", "pending": "검토 대기", "won": "계�
                 "released": "해제"}
 FORM_FIELDS = ["company_name", "biz_no", "contact_name", "contact_phone", "note"]
 
-st.set_page_config(page_title="파트너 영업권 관리 v2", page_icon="🤝", layout="wide")
+# page_icon: 브라우저 탭 아이콘. 이모지를 바꾸거나 줄을 지우면 Streamlit 기본 아이콘이 나온다.
+# (예전에 기본 아이콘이 안 나오던 문제는 starlette 버전 문제였고, requirements.txt에서 고쳤다)
+st.set_page_config(page_title="ENCY Sales(ENCY 파트너용)", page_icon="📊", layout="wide")
 
 # Streamlit Cloud에서는 secrets로 키를 넣는다
 if "ANTHROPIC_API_KEY" not in os.environ:
@@ -50,6 +55,7 @@ def days_left(expires_on: str) -> int:
 def reg_table(rows: list[dict], show_partner: bool = True,
               ext: dict[int, tuple[int, int]] | None = None) -> pd.DataFrame:
     """ext를 주면(총판 화면) 연장 횟수 열을 붙인다: 이 등록 n회 / 고객사 누적 m회."""
+    kinds = db.evidence_kinds()
     data = []
     for r in rows:
         item = {
@@ -61,6 +67,7 @@ def reg_table(rows: list[dict], show_partner: bool = True,
             "남은 일수": f"D-{days_left(r['expires_on'])}" if r["status"] in ("active", "won") else "-",
             "상태": STATUS_LABEL[r["status"]],
             "고객 담당자": r["contact_name"],
+            "증빙": evidence.summary(r, kinds.get(r["id"], set())),
         }
         if show_partner:
             item = {"파트너": r["partner_name"], **item}
@@ -73,6 +80,34 @@ def reg_table(rows: list[dict], show_partner: bool = True,
             item["연장"] = f"{own}회 (고객사 누적 {total}회)"
         data.append(item)
     return pd.DataFrame(data)
+
+
+def show_evidence(registration_id: int, add_as: str | None = None) -> None:
+    """등록 증빙 이미지를 보여 준다. add_as(계정 이름)를 주면 이미지를 추가로 올릴 수 있다."""
+    items = evidence.list_for(registration_id)
+    if not items:
+        st.caption("첨부된 증빙 이미지가 없습니다.")
+    cols = st.columns(3)
+    for i, e in enumerate(items):
+        with cols[i % 3]:
+            if e["file_path"].exists():
+                st.image(str(e["file_path"]), width="stretch")
+            else:
+                st.warning("이미지 파일을 찾을 수 없습니다.")
+            st.caption(f"{e['kind_label']} · {e['ts'][:16].replace('T', ' ')} · {e['uploader']}")
+    if add_as is None:
+        return
+    with st.form(f"add_evidence_{registration_id}", clear_on_submit=True):
+        st.markdown("**증빙 추가** (예: 명함만 냈다면 나중에 사업자등록증을 더할 수 있습니다)")
+        kind = st.radio("종류", list(evidence.KINDS), format_func=evidence.KINDS.get, horizontal=True)
+        f = st.file_uploader("이미지", type=["png", "jpg", "jpeg", "webp"])
+        if st.form_submit_button("추가") and f is not None:
+            try:
+                evidence.save(registration_id, kind, f.getvalue(), add_as)
+            except evidence.EvidenceError as err:
+                st.error(str(err))
+            else:
+                st.rerun()
 
 
 def ai_budget_left() -> int:
@@ -92,25 +127,55 @@ def use_ai(partner: str, what: str) -> bool:
 
 
 # ---- 로그인·사이드바 ----------------------------------------------------
+LOGIN_BG = Path(__file__).parent / "assets" / "login_bg.png"
+
+
+def login_background() -> None:
+    """로그인 화면 배경 이미지. 이미지 파일이 없으면 그냥 넘어간다."""
+    if not LOGIN_BG.exists():
+        return
+    img = base64.b64encode(LOGIN_BG.read_bytes()).decode()
+    st.markdown(f"""
+    
+<style>
+[data-testid="stApp"] {{
+    background: url("data:image/png;base64,{img}") center / cover no-repeat fixed;
+}}
+[data-testid="stForm"] {{
+    background: rgba(255, 255, 255, 0.92);
+}}
+[data-testid="stColumn"]:has([data-testid="stForm"]) {{
+    background: rgba(255, 255, 255, 0.9);
+    padding: 2rem;
+    border-radius: 16px;
+}}
+</style>
+""", unsafe_allow_html=True)
+
+
 
 def login_page() -> None:
-    st.title("파트너 영업권 관리")
-    with st.form("login"):
-        username = st.text_input("아이디")
-        password = st.text_input("비밀번호", type="password")
-        if st.form_submit_button("로그인", type="primary"):
-            account = auth.login(username, password)
-            if account is None:
-                st.error("아이디 또는 비밀번호가 맞지 않습니다.")
-            else:
-                clear_form()
-                st.session_state["user"] = account
-                st.rerun()
-    with st.expander("시연용 계정"):
-        st.markdown("\n".join(
-            f"- {partner or ADMIN} · {name} ({ROLE_LABEL[prole] if partner else '총판'}): `{username}` / `{password}`"
-            for username, password, _, partner, name, prole in seed.DEMO_ACCOUNTS
-        ))
+    login_background()
+    _, mid, _ = st.columns([1, 1, 1])   # 화면을 3칸으로 나눔 (왼쪽 빈칸 · 가운데 · 오른쪽 빈칸)
+    with mid:                           # ↓ 여기부터 전부 가운데 칸에 들어감
+        st.title("파트너 계정 로그인", text_alignment="center")
+        with st.form("login"):
+            username = st.text_input("아이디")
+            password = st.text_input("비밀번호", type="password")
+            if st.form_submit_button("로그인", type="primary"):
+                account = auth.login(username, password)
+                if account is None:
+                    st.error("아이디 또는 비밀번호가 맞지 않습니다.")
+                else:
+                    clear_form()
+                    st.session_state["user"] = account
+                    st.rerun()
+        with st.expander("시연용 계정"):
+            st.markdown("\n".join(
+                f"- {partner or ADMIN} · {name} ({ROLE_LABEL[prole] if partner else '총판'}): `{username}` / `{password}`"
+                for username, password, _, partner, name, prole in seed.DEMO_ACCOUNTS
+            ))
+
 
 
 ROLE_LABEL = {"manager": "파트너 관리자", "rep": "영업 담당자"}
@@ -143,7 +208,7 @@ def must_change_page(user: dict) -> None:
 
 def sidebar(user: dict) -> None:
     with st.sidebar:
-        st.header("🤝 영업권 관리 v2")
+        st.header("영업권 관리 v2")
         if user["role"] == "admin":
             st.write(f"**{ADMIN}** ({user['username']})")
         else:
@@ -181,9 +246,24 @@ def invalidate_check() -> None:
     st.session_state.pop("check", None)
 
 
+def current_uploads() -> dict:
+    """지금 등록 화면에 올라와 있는 증빙 이미지: {'card': 파일, 'cert': 파일} 중 있는 것만."""
+    gen = st.session_state.get("upload_gen", 0)
+    return {k: st.session_state[f"{k}_{gen}"] for k in evidence.KINDS
+            if st.session_state.get(f"{k}_{gen}") is not None}
+
+
 def register_tab(partner: dict) -> None:
+    # 고객사 등록 화면을 가운데 칸에 넣는다 (입력칸이 화면 끝까지 늘어나지 않게). [1, 2, 1]의 가운데 숫자를 키우면 넓어진다.
+    _, mid, _ = st.columns([1.5, 2.8, 1.5])
+    with mid:
+        register_form(partner)
+
+
+def register_form(partner: dict) -> None:
     st.subheader("고객사 등록")
     st.write("명함이나 사업자등록증 이미지를 올리면 AI가 내용을 채워 줍니다. 직접 입력해도 됩니다.")
+    st.info(f"**{evidence.REQUIREMENT}** 첨부한 이미지는 등록 증빙으로 보관되며 총판이 확인할 수 있습니다.")
 
     if st.session_state.pop("reset_form", False):
         clear_form()
@@ -192,10 +272,18 @@ def register_tab(partner: dict) -> None:
     for f in FORM_FIELDS:
         st.session_state.setdefault(f"f_{f}", "")
 
-    up = st.file_uploader("명함·사업자등록증 이미지", type=["png", "jpg", "jpeg", "webp"],
-                          key=f"upload_{st.session_state.get('upload_gen', 0)}")
+    gen = st.session_state.get("upload_gen", 0)
+    u1, u2 = st.columns(2)
+    for col, kind in ((u1, "card"), (u2, "cert")):
+        with col:
+            f = st.file_uploader(f"{evidence.KINDS[kind]} 이미지", type=["png", "jpg", "jpeg", "webp"],
+                                 key=f"{kind}_{gen}")
+            if f is not None:
+                st.image(f, width="stretch")
+    uploads = current_uploads()
+    # AI 자동 입력은 사업자등록증을 먼저 읽는다 (사업자번호가 확실히 적혀 있으므로)
+    up = uploads.get("cert") or uploads.get("card")
     if up is not None:
-        st.image(up, width=320)
         if st.button("🪄 AI로 자동 입력", disabled=not ai_extract.available()):
             if use_ai(partner["name"], "이미지 추출"):
                 with st.spinner("이미지를 읽는 중…"):
@@ -241,6 +329,10 @@ def run_check(partner: dict) -> dict:
         return result
     if biz and not matching.is_valid_biz_no(biz):
         result["error"] = "사업자등록번호 형식이 올바르지 않습니다(10자리·검증번호 확인)."
+        return result
+    uploads = current_uploads()
+    if msg := evidence.missing_requirement(biz, "card" in uploads, "cert" in uploads):
+        result["error"] = msg
         return result
     found = matching.find_conflicts(name, biz, db.holding_registrations())
     result["exact"], result["similar"] = found["exact"], found["similar"]
@@ -301,6 +393,16 @@ def show_check_result(partner: dict, check: dict) -> None:
             invalidate_check()
             st.error("확인 후 입력값이 바뀌었습니다. '선점 여부 확인'을 다시 눌러 주세요.")
             return
+        uploads = current_uploads()
+        if msg := evidence.missing_requirement(check["biz"], "card" in uploads, "cert" in uploads):
+            st.error(msg)  # 확인한 뒤 이미지를 지운 경우
+            return
+        # 이미지를 먼저 줄여 본다: 읽을 수 없는 파일이면 등록 전에 멈춘다
+        try:
+            shrunk = {k: evidence.shrink(f.getvalue()) for k, f in uploads.items()}
+        except evidence.EvidenceError as e:
+            st.error(str(e))
+            return
         rid = db.add_registration(
             partner["id"], check["name"], matching.format_biz_no(check["biz"]),
             st.session_state["f_contact_name"].strip(), st.session_state["f_contact_phone"].strip(),
@@ -308,6 +410,8 @@ def show_check_result(partner: dict, check: dict) -> None:
         )
         db.log("register" if status == "active" else "pending", partner["name"], rid,
                f"{check['name']} " + ("등록" if status == "active" else f"검토 요청 — {reason}"))
+        for kind, data in shrunk.items():
+            evidence.store(rid, kind, data, partner["user"]["username"])
         # 입력 위젯이 이미 그려졌으므로 값은 다음 실행 첫머리에서 비운다
         st.session_state["reset_form"] = True
         st.session_state["flash"] = "등록되었습니다." if status == "active" else "검토 요청이 접수되었습니다."
@@ -336,6 +440,14 @@ def my_tab(partner: dict) -> None:
     st.caption("계약 고객은 90일이 아니라 계약 종료일까지 영업권이 유지됩니다. '영업 관리'에서 단계를 '수주'로 바꾸면 계약 고객이 됩니다.")
     st.dataframe(reg_table(rows, show_partner=False), hide_index=True, width="stretch")
     edit_section(partner, rows)
+    with st.expander("📎 등록 증빙 이미지 (명함·사업자등록증)"):
+        st.caption("우리 회사가 등록한 고객사의 증빙만 보입니다. 증빙은 총판도 확인할 수 있으며, 지워지지 않습니다.")
+        by_id = {r["id"]: r for r in rows}
+        eid = st.selectbox("고객사", list(by_id), key="evidence_pick",
+                           format_func=lambda i: f"{by_id[i]['company_name']} ({STATUS_LABEL[by_id[i]['status']]}, "
+                                                 f"등록 {by_id[i]['registered_at'][:10]})")
+        can_add = by_id[eid]["status"] in ("active", "pending", "won")
+        show_evidence(eid, add_as=partner["user"]["username"] if can_add else None)
 
 
 def biz_no_conflict(registration_id: int, biz: str, partner_id: int) -> str | None:
@@ -370,6 +482,10 @@ def edit_section(partner: dict, rows: list[dict]) -> None:
         biz = biz.strip()
         if biz and not matching.is_valid_biz_no(biz):
             st.error("사업자등록번호 형식이 올바르지 않습니다(10자리·검증번호 확인).")
+            return
+        has = db.evidence_kinds().get(rid, set())
+        if msg := evidence.missing_requirement(biz, "card" in has, "cert" in has):
+            st.error(f"사업자번호를 지울 수 없습니다. {msg}")
             return
         biz = matching.format_biz_no(biz) if biz else ""
         if biz and matching.normalize_biz_no(biz) != matching.normalize_biz_no(r["biz_no"]):
@@ -652,6 +768,8 @@ def review_tab() -> None:
         with st.container(border=True):
             st.markdown(f"**{r['company_name']}** · {r['partner_name']} · {r['registered_at'][:16].replace('T', ' ')} 요청")
             st.caption(r["review_reason"])
+            with st.expander(f"증빙 보기 — {evidence.summary(r, db.evidence_kinds().get(r['id'], set()))}"):
+                show_evidence(r["id"])
             c1, c2, _ = st.columns([1, 1, 4])
             if c1.button("승인", key=f"ok{r['id']}"):
                 db.set_status(r["id"], "active")
@@ -667,7 +785,7 @@ EVENT_LABEL = {"register": "등록", "pending": "검토 요청", "blocked": "등
                "reject": "반려", "expire": "만료", "ai_call": "AI 호출", "notice": "공지", "edit": "정보 수정",
                "release": "등록 해제", "extend": "기간 연장", "transfer": "이관", "rename": "회사명 수정",
                "restore": "반려 취소", "handover": "퇴사 인계", "account": "계정 관리",
-               "won": "수주(계약 고객)", "renew": "계약 갱신"}
+               "won": "수주(계약 고객)", "renew": "계약 갱신", "evidence": "증빙 첨부"}
 
 
 def run_action(fn, done: str, *args, **kwargs):
@@ -703,6 +821,8 @@ def manage_tab() -> None:
         f"{until} {r['expires_on']}  \n"
         f"기간 연장: 이 등록 **{own_ext}회** · 이 고객사 누적 **{total_ext}회** (모든 파트너·재등록 포함)"
     )
+    with st.expander(f"📎 등록 증빙 — {evidence.summary(r, db.evidence_kinds().get(rid, set()))}", expanded=True):
+        show_evidence(rid)
     status = r["status"]
     if status in ("expired", "released"):
         st.info("만료·해제된 등록은 조치 대상이 아닙니다. 다시 보호하려면 파트너가 새로 등록해야 합니다.")
@@ -902,7 +1022,7 @@ elif user["must_change_pw"]:
     must_change_page(user)
 else:
     sidebar(user)
-    st.title("파트너 영업권 관리")
+    st.title("파트너 영업 관리")
     if user["role"] == "admin":
         admin_view(user)
     else:

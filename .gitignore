@@ -4,3 +4,5 @@ data/
 .env
 .streamlit/secrets.toml
 .pytest_cache/
+# 출처가 불분명한 로그인 배경 이미지는 공개 저장소에 올리지 않는다 (없으면 배경 없이 동작)
+assets/login_bg.*

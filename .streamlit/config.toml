@@ -1,0 +1,14 @@
+# 사이트 전체 디자인 설정. 값을 바꾸고 저장한 뒤 "사이트를 껐다 켜야" 반영된다 (Rerun으로는 안 바뀜).
+# 색은 #RRGGBB 형식. 색 고르기: 구글에 "color picker" 검색
+
+[theme]
+# 글꼴: "이름:구글폰트 주소" 형식으로 구글 폰트를 바로 쓸 수 있다 (https://fonts.google.com 에서 Korean으로 검색)
+font = "Noto Sans KR:https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap"
+headingFont = "Noto Sans KR:https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap"
+baseFontSize = 15            # 기본 글자 크기(px)
+
+textColor = "#1e1d4d"        # 거의 모든 글자 색
+primaryColor = "#3182F6"     # 버튼·강조·선택 표시 색
+linkColor = "#3182F6"        # 링크 색
+backgroundColor = "#FFFFFF"  # 바탕색
+secondaryBackgroundColor = "#F2F4F6"  # 사이드바·입력칸 바탕색

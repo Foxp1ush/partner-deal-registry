@@ -90,3 +90,50 @@ def test_end_contract_blocks_all_and_can_release(env):
         accounts.end_contract(admin, pid, "x", False, path=path)
     accounts.resume_contract(admin, pid, path=path)
     assert auth.refresh(boss, path=path) is not None
+
+
+def test_engineer_cannot_manage_accounts(env):
+    path, admin = env
+    _, boss = new_partner(path, admin)
+    db.add_account("eng", auth.hash_password("eng-pw"), "admin", partner_role="engineer", path=path)
+    eng = auth.login("eng", "eng-pw", path=path)
+    with pytest.raises(accounts.AccountError):
+        accounts.create_partner(eng, "엔지니어파트너", "e-boss", "대표", path=path)
+    with pytest.raises(accounts.AccountError):
+        accounts.reset_password(eng, "new-boss", path=path)
+    with pytest.raises(accounts.AccountError):
+        accounts.end_contract(eng, boss["partner_id"], "사유", False, path=path)
+    assert accounts.reset_password(admin, "new-boss", path=path)  # 총괄 매니저는 그대로 가능
+
+
+def test_demo_engineer_account():
+    rows = {u: (role, prole) for u, _, role, _, _, prole in seed.DEMO_ACCOUNTS}
+    assert rows["engineer"] == ("admin", "engineer") and rows["admin"] == ("admin", "manager")
+
+
+def test_update_profile(env):
+    path, admin = env
+    _, boss = new_partner(path, admin)
+    accounts.update_profile(boss, " 김대표 ", "대표", "경영지원", "010-1234-5678", "boss@new.example", path=path)
+    me = auth.refresh(boss, path=path)
+    assert (me["display_name"], me["title"], me["department"], me["phone"], me["email"]) == \
+        ("김대표", "대표", "경영지원", "010-1234-5678", "boss@new.example")
+    assert any("new-boss 프로필 수정" in e["detail"] for e in db.list_events(path=path))
+    accounts.update_profile(me, "김대표", "", "", "", "", path=path)  # 이메일 등은 비워도 된다
+    assert auth.refresh(boss, path=path)["email"] == ""
+    with pytest.raises(accounts.AccountError):
+        accounts.update_profile(me, "  ", "", "", "", "", path=path)
+    with pytest.raises(accounts.AccountError):
+        accounts.update_profile(me, "김대표", "", "", "", "not-an-email", path=path)
+
+
+def test_profile_columns_added_to_old_db(tmp_path):
+    import sqlite3
+    path = tmp_path / "old.db"
+    with sqlite3.connect(path) as c:
+        c.execute("CREATE TABLE accounts (username TEXT PRIMARY KEY, password_hash TEXT NOT NULL, "
+                  "role TEXT NOT NULL, partner_id INTEGER)")
+        c.execute("INSERT INTO accounts VALUES ('old', 'x', 'admin', NULL)")
+    db.init(path)
+    acc = db.get_account("old", path=path)
+    assert (acc["title"], acc["department"], acc["phone"], acc["email"]) == ("", "", "", "")

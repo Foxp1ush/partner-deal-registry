@@ -15,6 +15,7 @@ from pathlib import Path
 
 import admin
 import auth
+import crm
 import db
 from db import DB_PATH
 
@@ -47,8 +48,9 @@ def _account(username: str, path: Path) -> dict:
 
 
 def _need_admin(actor: dict) -> None:
-    if actor["role"] != "admin":
-        raise AccountError("총판 관리자만 할 수 있습니다.")
+    """총판 총괄 매니저만. 총판 엔지니어(partner_role=engineer)는 계정·계약 조치를 할 수 없다."""
+    if actor["role"] != "admin" or actor.get("partner_role") != "manager":
+        raise AccountError("총판 총괄 매니저만 할 수 있습니다.")
 
 
 def _need_partner_manager(actor: dict, target: dict) -> None:
@@ -105,8 +107,8 @@ def end_contract(actor: dict, partner_id: int, reason: str, release_registration
     db.set_partner_active(partner_id, False, path=path)
     released = 0
     if release_registrations:
-        for r in db.list_registrations(partner_id, statuses=("active", "pending", "won"), path=path):
-            admin.release(r["id"], f"계약 종료 — {reason}", path=path)
+        for r in db.list_registrations(partner_id, statuses=("active", "pending", "won", "lapsed"), path=path):
+            admin.release(actor, r["id"], f"계약 종료 — {reason}", path=path)
             released += 1
     db.log("account", partner["name"], None, f"계약 종료(계정 일괄 차단, 영업권 해제 {released}건) — {reason}", path=path)
     return released
@@ -128,7 +130,9 @@ def reset_password(actor: dict, username: str, path: Path = DB_PATH) -> str:
     target = _account(username, path)
     if target["role"] == "admin":
         raise AccountError("총판 관리자 계정은 여기서 재설정할 수 없습니다.")
-    if actor["role"] != "admin":
+    if actor["role"] == "admin":
+        _need_admin(actor)
+    else:
         _need_partner_manager(actor, target)
         if username == actor["username"]:
             raise AccountError("내 비밀번호는 '비밀번호 변경'에서 바꿔 주세요.")
@@ -152,6 +156,22 @@ def change_own_password(user: dict, current: str, new: str, confirm: str, path: 
     if user["username"].lower() in new.lower():
         raise AccountError("비밀번호에 아이디를 넣을 수 없습니다.")
     db.set_password(user["username"], auth.hash_password(new), must_change=False, path=path)
+
+
+# ---- 내 프로필 ----------------------------------------------------------
+
+def update_profile(user: dict, display_name: str, title: str, department: str, phone: str, email: str,
+                   path: Path = DB_PATH) -> None:
+    """본인 프로필 저장. 이름은 꼭 있어야 하고, 이메일은 비우거나 형식이 맞아야 한다."""
+    acc = _account(user["username"], path)
+    display_name, title, department, phone, email = (
+        (v or "").strip() for v in (display_name, title, department, phone, email))
+    if not display_name:
+        raise AccountError("이름을 입력해 주세요.")
+    if email and not crm._EMAIL.match(email):
+        raise AccountError("이메일 형식이 맞지 않습니다. 예: name@company.com")
+    db.set_profile(user["username"], display_name, title, department, phone, email, path=path)
+    db.log("account", acc["partner_name"] or "", None, f"{user['username']} 프로필 수정", path=path)
 
 
 # ---- 파트너 관리자 ------------------------------------------------------

@@ -11,12 +11,17 @@
 - 기록은 쓴 파트너의 것이다. 등록이 다른 파트너로 이관되거나 파트너 계약이 끝나도 새 파트너에게는
   보이지 않고, 지우지 않고 보존한다(분쟁 근거. 총판은 사유를 남기고만 열람).
 
-수주 정책 (ENCY CAM: 영구 라이선스 + 유지보수)
-- 라이선스 시작일부터 1년은 유지보수(최신 버전 업데이트)가 무료이고, 이후엔 유지보수 비용을 내야 1년씩 연장된다.
-  구매 계약일과 라이선스 시작일은 다를 수 있다.
-- 단계를 '수주'로 바꾸면 '계약 고객(won)'이 되고 **유지보수 종료일(라이선스 시작일 + 1년)까지** 선점이 유지된다.
-  라이선스 시작일을 비우면 수주한 날을 시작일로 본다.
-- 유지보수를 연장하면 종료일을 늦춘다. 종료일이 지나도 연장 기록이 없으면 만료되어 다른 파트너가 등록할 수 있다.
+수주 정책 (ENCY CAM 라이선스)
+- 가망 고객의 '영업 보호'(90일, deal registration)와 계약 고객의 '담당 파트너'(partner of record)는 다르다.
+  계약 고객은 이미 산 고객이라 보호 '기간'이 없다. 판 파트너가 담당으로 남고, 유지보수·구독 종료일은
+  연장·갱신 영업 시점일 뿐이다. 담당이 바뀌는 건 고객 요청(총판 이관), 파트너 계약 종료, 구독 미갱신 때뿐이다.
+- 수주 때 라이선스 종류·라이선스 시작일·고객사 ENCY 계정 이메일을 꼭 받는다. 계약일과 시작일은 다를 수 있다.
+- 영구 라이선스: 시작일부터 1년은 유지보수(최신 버전 업데이트)가 무료. 그 뒤엔 계속 쓸 수 있지만 업데이트는 안 되고,
+  고객이 2~3년 뒤에 유지보수 비용을 내고 다시 가입하는 경우가 많다.
+  → 유지보수가 끝나면 'lapsed(유지보수 만료·사용 중)'. 담당 파트너는 그대로, 재가입 영업 대상.
+- 1년·3년 구독: 구독이 끝나면 쓸 수 없다. 끝나면 'lapsed(갱신 유예)'로 90일 동안 담당 유지, 그 뒤 갱신이 없으면 만료.
+- 다른 파트너가 담당 고객을 등록하려 하면 자동 차단 대신 총판 검토로 간다(고객이 파트너 변경을 원할 수 있음).
+- 유지보수 연장·재가입, 구독 갱신은 renew_contract()로 종료일을 늦춘다.
 
 예상 구매일
 - '구매 임박'(1개월 안)은 날짜가 단계의 뜻이라 필수. '구매 검토'는 결정권자 검토처럼 시기를 모를 수 있어 비워도 된다.
@@ -43,14 +48,14 @@ STAGE_GUIDE = {
     "견적·데모": "고객이 견적서를 요청했거나 현장 기술 데모를 요청한 상태",
     "구매 검토": "3개월 안에 구매가 예상되거나, 구매팀장·대표 등 결정권자가 검토 중인 상태",
     "구매 임박": "1개월 안에 구매가 확정될 상태",
-    "수주": "계약을 체결한 상태 (유지보수 종료일까지 영업권 유지)",
+    "수주": "계약을 체결한 상태 (담당 고객으로 계속 관리, 보호 기간 없음)",
     "보류": "고객 사정으로 영업이 멈춘 상태 (예산 동결, 담당자 공석 등)",
     "실패": "고객이 다른 제품을 택했거나 구매하지 않기로 한 상태",
 }
 FORECAST_STAGES = ("구매 검토", "구매 임박")  # 예상 구매일을 받는 단계
 EXPECTED_REQUIRED = ("구매 임박",)          # 예상 구매일이 꼭 있어야 하는 단계
 IMMINENT_DAYS = 31  # '구매 임박'의 예상 구매일 상한
-FREE_MAINTENANCE_DAYS = 365  # 라이선스 시작일부터 무상 유지보수 기간
+LICENSE_TYPES = {k: v[0] for k, v in db.LICENSE_TYPES.items()}  # perpetual → '영구', sub1 → '1년 구독', …
 ACTIVITY_KINDS = ["미팅", "전화", "메일", "데모", "견적 제출", "계약", "갱신", "정정", "기타"]
 NOTE_MAX = 500
 NOTE_GUIDE = "고객사 내부 사정 같은 민감한 내용은 적지 마세요. 사실 위주로 짧게 남겨 주세요."
@@ -155,10 +160,64 @@ def _check_contract_end(contract_end: str | None, after: str | None = None) -> s
     return end.isoformat()
 
 
-def maintenance_end(license_start: str) -> tuple[str, str]:
-    """(라이선스 시작일, 무상 유지보수 종료일 = 시작일 + 1년)."""
+def license_end(license_type: str, license_start: str) -> tuple[str, str]:
+    """(라이선스 시작일, 보호 종료일). 영구는 시작일 + 1년(무상 유지보수), 구독은 시작일 + 구독 기간."""
     start = date.fromisoformat(str(license_start))
-    return start.isoformat(), (start + timedelta(days=FREE_MAINTENANCE_DAYS)).isoformat()
+    return start.isoformat(), (start + timedelta(days=db.LICENSE_TYPES[license_type][1])).isoformat()
+
+
+def end_label(row: dict) -> str:
+    """종료일의 이름: 영구는 '유지보수 종료', 구독은 '구독 종료'."""
+    return "유지보수 종료" if db.is_perpetual(row) else "구독 종료"
+
+
+def grace_end(row: dict) -> str:
+    """구독이 끝난 고객의 갱신 유예 마지막 날 (종료일 + 90일)."""
+    return (date.fromisoformat(row["expires_on"]) + timedelta(days=db.SUB_GRACE_DAYS)).isoformat()
+
+
+def relation(row: dict) -> str:
+    """이 고객과 우리의 관계를 한 줄로. 가망 고객은 '영업 보호 기간', 계약 고객은 '담당 고객 + 다음 영업 시점'."""
+    d = (date.fromisoformat(row["expires_on"]) - date.today()).days
+    if row["status"] in ("active", "pending"):
+        return f"영업 보호 ~{row['expires_on']} (D-{d})"
+    if row["status"] == "won":
+        return f"담당 고객 · {end_label(row)} {row['expires_on']} (연장 영업 D-{d})"
+    if row["status"] == "lapsed":
+        if db.is_perpetual(row):
+            return f"담당 고객 · 유지보수 만료 {row['expires_on']} (재가입 영업 대상)"
+        return f"담당 고객 · 구독 종료 {row['expires_on']} (갱신 유예 ~{grace_end(row)})"
+    return "-"
+
+
+def renewal_default(row: dict, years: int = 1) -> str:
+    """연장 기본 종료일. 유지보수 중·구독 중이면 지금 종료일 + n년, 유지보수가 이미 끝났으면(재가입) 오늘 + n년."""
+    base = date.fromisoformat(row["expires_on"])
+    if row["status"] == "lapsed" or base < date.today():
+        base = date.today()
+    return (base + timedelta(days=365 * years)).isoformat()
+
+
+VAT_NOTE = "(공급가액, VAT 10% 별도)"
+AMOUNT_MAX = 10_000_000_000  # 100억 원. 자릿수를 잘못 넣는 실수를 막는 상한
+
+
+def won_text(amount: int) -> str:
+    """금액을 '12,000,000원'처럼. 0은 미입력(금액 칸이 생기기 전의 계약 고객)."""
+    return f"{amount:,}원" if amount else "금액 미입력"
+
+
+def check_amount(amount) -> int:
+    """수주 계약 금액(공급가액 · VAT 별도). 1원 이상 100억 원 이하의 정수."""
+    try:
+        value = int(amount)
+    except (TypeError, ValueError):
+        raise CrmError(f"계약 금액을 입력해 주세요 {VAT_NOTE}.") from None
+    if value <= 0:
+        raise CrmError(f"계약 금액을 입력해 주세요 {VAT_NOTE}.")
+    if value > AMOUNT_MAX:
+        raise CrmError("계약 금액이 너무 큽니다. 자릿수를 확인해 주세요.")
+    return value
 
 
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -195,13 +254,15 @@ def is_overdue(row: dict) -> bool:
 
 def set_stage(user: dict, registration_id: int, stage: str, contract_end: str | None = None,
               expected_close: str | None = None, license_start: str | None = None,
-              ency_account: str | None = None, path: Path = DB_PATH) -> None:
+              ency_account: str | None = None, license_type: str | None = None,
+              contract_amount: int | None = None, path: Path = DB_PATH) -> None:
     """영업 단계를 바꾼다.
 
     - '구매 임박'은 예상 구매일이 필요하고, '구매 검토'는 선택이다(같은 단계에서 날짜만 바꾸는 것도 가능).
-    - '수주'로 바꾸면 유지보수 종료일까지 영업권을 유지하는 계약 고객이 된다.
-      필수: 라이선스 시작일, 고객사 ENCY 계정 이메일.
-      종료일은 라이선스 시작일 + 1년. contract_end를 직접 주면 그 날짜를 쓴다(이미 연장한 고객 등).
+    - '수주'로 바꾸면 계약 고객이 된다. 필수: 라이선스 종류, 라이선스 시작일, 고객사 ENCY 계정 이메일,
+      계약 금액(공급가액 · VAT 별도).
+      종료일은 영구 = 시작일 + 1년(무상 유지보수), 구독 = 시작일 + 구독 기간.
+      contract_end를 직접 주면 그 날짜를 쓴다(이미 연장한 고객 등).
     """
     row = _get_own(user, registration_id, path)
     if stage not in STAGES:
@@ -218,42 +279,64 @@ def set_stage(user: dict, registration_id: int, stage: str, contract_end: str | 
         return
     else:
         fields["expected_close"] = ""
-    if stage == "수주" and row["status"] != "won":
+    if stage == "수주" and row["status"] not in ("won", "lapsed"):  # lapsed는 '유지보수 재가입'으로 처리
         if row["status"] == "pending":
             raise CrmError("총판 검토가 끝난 뒤에 수주 처리할 수 있습니다.")
         if row["status"] != "active":
             raise CrmError("보호 기간이 끝난 고객입니다. 다시 등록한 뒤 수주 처리해 주세요.")
+        if license_type not in db.LICENSE_TYPES:
+            raise CrmError("라이선스 종류(영구 / 1년 구독 / 3년 구독)를 골라 주세요.")
         if not license_start:
-            raise CrmError("라이선스 시작일을 입력해 주세요. 유지보수 종료일(시작일 + 1년)까지 영업권이 유지됩니다.")
+            raise CrmError("라이선스 시작일을 입력해 주세요. 영구는 유지보수 종료일(시작일 + 1년), "
+                           "구독은 구독 종료일까지 영업권이 유지됩니다.")
         email = check_ency_account(ency_account)
-        start, free_end = maintenance_end(license_start)
+        amount = check_amount(contract_amount)
+        start, term_end = license_end(license_type, license_start)
+        kind = LICENSE_TYPES[license_type]
+        what = "유지보수 종료일" if license_type == "perpetual" else "구독 종료일"
         try:
-            end = _check_contract_end(contract_end or free_end)
+            end = _check_contract_end(contract_end or term_end)
         except CrmError:
             if contract_end:
                 raise
-            raise CrmError(f"라이선스 시작일({start})로부터 무상 유지보수 1년이 이미 지났습니다. "
-                           "시작일을 다시 확인해 주세요.") from None
-        fields |= {"status": "won", "expires_on": end, "license_start": start, "ency_account": email}
-        note += f" (라이선스 시작 {start}, 유지보수 종료일 {end}까지 영업권 유지, ENCY 계정 {email})"
+            if date.fromisoformat(term_end) <= date.today():
+                raise CrmError(f"라이선스 시작일({start})로부터 {kind} 기간이 이미 지났습니다. "
+                               "시작일을 다시 확인해 주세요.") from None
+            raise CrmError(f"라이선스 시작일이 너무 먼 미래입니다. {what}이 오늘부터 "
+                           f"{db.CONTRACT_MAX_DAYS // 365}년을 넘을 수 없습니다.") from None
+        fields |= {"status": "won", "expires_on": end, "license_start": start, "ency_account": email,
+                   "license_type": license_type, "contract_amount": amount, "won_at": db.now_iso()}
+        note += (f" ({kind}, 계약 금액 {won_text(amount)} {VAT_NOTE}, 라이선스 시작 {start}, "
+                 f"{what} {end}까지 영업권 유지, ENCY 계정 {email})")
         db.log("won", user["partner_name"], registration_id,
-               f"{row['company_name']} 수주 — 라이선스 시작 {start}, 유지보수 종료일 {end}까지 보호, "
+               f"{row['company_name']} 수주 — {kind}, 계약 금액 {won_text(amount)} {VAT_NOTE}, "
+               f"라이선스 시작 {start}, {what} {end}까지 보호, "
                f"ENCY 계정 발급 요청 {email} (기존 만료일 {row['expires_on']})", path=path)
     db.update_registration(registration_id, fields, allowed=ADMIN_EDITABLE, path=path)
     db.add_activity(registration_id, user["partner_id"], user["username"], "단계 변경", note, path=path)
+    if stage != row["stage"]:
+        db.add_stage_change(registration_id, user["partner_id"], row["stage"], stage, user["username"], path=path)
+
+
+def renew_label(row: dict) -> str:
+    """연장 동작의 이름: 영구 = 유지보수 연장(유지보수 중) / 유지보수 재가입(만료 후), 구독 = 구독 갱신."""
+    if not db.is_perpetual(row):
+        return "구독 갱신"
+    return "유지보수 재가입" if row["status"] == "lapsed" else "유지보수 연장"
 
 
 def renew_contract(user: dict, registration_id: int, new_end: str, path: Path = DB_PATH) -> str:
-    """계약 고객의 유지보수를 연장해 유지보수 종료일을 늦춘다. 새 종료일을 돌려준다."""
+    """유지보수 연장·재가입, 구독 갱신: 종료일을 늦춘다. 재가입이면 다시 계약 고객(won)이 된다. 새 종료일을 돌려준다."""
     row = _get_own(user, registration_id, path)
-    if row["status"] != "won":
-        raise CrmError("계약 고객만 유지보수를 연장할 수 있습니다. 먼저 단계를 '수주'로 바꿔 주세요.")
+    if row["status"] not in ("won", "lapsed"):
+        raise CrmError("계약 고객만 연장할 수 있습니다. 먼저 단계를 '수주'로 바꿔 주세요.")
+    action, label = renew_label(row), end_label(row)
     end = _check_contract_end(new_end, after=row["expires_on"])
-    db.update_registration(registration_id, {"expires_on": end}, allowed=ADMIN_EDITABLE, path=path)
+    db.update_registration(registration_id, {"expires_on": end, "status": "won"}, allowed=ADMIN_EDITABLE, path=path)
     db.add_activity(registration_id, user["partner_id"], user["username"], "갱신",
-                    f"유지보수 연장: 종료일 {row['expires_on']} → {end}", path=path)
+                    f"{action}: {label}일 {row['expires_on']} → {end}", path=path)
     db.log("renew", user["partner_name"], registration_id,
-           f"{row['company_name']} 유지보수 연장 — 종료일 {row['expires_on']}→{end}", path=path)
+           f"{row['company_name']} {action} — {label}일 {row['expires_on']}→{end}", path=path)
     return end
 
 
@@ -347,13 +430,27 @@ def forecast(path: Path = DB_PATH) -> dict[str, dict[str, int]]:
     return out
 
 
+def customer_ids(row: dict, path: Path = DB_PATH) -> list[int]:
+    """모든 파트너를 통틀어 같은 고객사인 등록 (related_ids의 전체 파트너판). 이관 전 기록까지 찾을 때 쓴다."""
+    nb, nn = matching.normalize_biz_no(row["biz_no"]), matching.normalize_name(row["company_name"])
+    return [r["id"] for r in db.list_registrations(path=path)
+            if (nb and matching.normalize_biz_no(r["biz_no"]) == nb) or matching.normalize_name(r["company_name"]) == nn]
+
+
 def admin_open_detail(viewer: str, registration_id: int, reason: str, path: Path = DB_PATH) -> list[dict]:
-    """총판의 상세 열람. 사유가 있어야 열리고, 열람 기록이 해당 파트너 관리자에게 보인다."""
+    """총판의 상세 열람. 사유가 있어야 열리고, 열람 기록이 기록을 쓴 파트너 모두의 관리자에게 보인다.
+
+    이관된 고객이면 이전 파트너가 남긴 기록도 함께 보여 준다(분쟁 확인용). 새 파트너 화면에는 여전히 보이지 않는다.
+    각 기록에 partner_name(기록을 쓴 파트너)을 붙인다.
+    """
     reason = (reason or "").strip()
     if len(reason) < 5:
         raise CrmError("열람 사유를 5자 이상 적어 주세요. 이 사유는 해당 파트너에게 공개됩니다.")
     row = db.get_registration(registration_id, path=path)
     if row is None:
         raise CrmError("등록을 찾을 수 없습니다.")
-    db.log_access(viewer, row["partner_id"], registration_id, reason, path=path)
-    return db.list_activities(related_ids(row, path), partner_id=row["partner_id"], path=path)
+    items = db.list_activities(customer_ids(row, path), path=path)
+    names = {p["id"]: p["name"] for p in db.list_partners(path=path)}
+    for pid in dict.fromkeys([row["partner_id"]] + [a["partner_id"] for a in items]):
+        db.log_access(viewer, pid, registration_id, reason, path=path)
+    return [{**a, "partner_name": names.get(a["partner_id"], "")} for a in items]

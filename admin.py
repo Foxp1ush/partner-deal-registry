@@ -1,4 +1,6 @@
-"""총판 관리자 조치: 해제, 기간 연장, 이관, 회사명 수정, 반려 되돌리기.
+"""총판 관리자 조치: 검토 승인·반려, 해제, 기간 연장, 이관, 회사명 수정, 반려 되돌리기.
+
+모든 조치 함수는 첫 인자로 조치하는 계정(actor)을 받고, 총괄 매니저가 아니면 막는다.
 
 모든 조치는 사유를 받아 이력에 남긴다(분쟁 시 근거).
 다른 파트너의 선점과 겹치게 되는 조치는 막는다.
@@ -20,6 +22,12 @@ ACTOR = "총판 관리자"
 
 class ActionError(Exception):
     """조치를 할 수 없을 때. 메시지를 그대로 화면에 보여 준다."""
+
+
+def _need_manager(actor: dict) -> None:
+    """조치는 총판 총괄 매니저만. 총판 엔지니어는 메뉴에서 숨길 뿐 아니라 여기서도 막는다."""
+    if actor.get("role") != "admin" or actor.get("partner_role") != "manager":
+        raise ActionError("총판 총괄 매니저만 할 수 있는 조치입니다.")
 
 
 def _load(registration_id: int, allowed: tuple[str, ...], path: Path) -> dict:
@@ -55,15 +63,17 @@ def _save(row: dict, fields: dict, kind: str, detail: str, partner: str | None =
     db.log(kind, partner or row["partner_name"], row["id"], f"[{ACTOR}] {detail}", path=path)
 
 
-def release(registration_id: int, reason: str, path: Path = DB_PATH) -> None:
-    """보호 중·검토 대기·계약 고객 등록을 해제한다. 해제되면 다른 파트너가 등록할 수 있다."""
-    row = _load(registration_id, ("active", "pending", "won"), path)
+def release(actor: dict, registration_id: int, reason: str, path: Path = DB_PATH) -> None:
+    """보호 중·검토 대기·계약 고객·유지보수 만료 고객 등록을 해제한다. 해제되면 다른 파트너가 등록할 수 있다."""
+    _need_manager(actor)
+    row = _load(registration_id, ("active", "pending", "won", "lapsed"), path)
     reason = _need_reason(reason)
     _save(row, {"status": "released"}, "release", f"{row['company_name']} 등록 해제 — {reason}", path=path)
 
 
-def extend(registration_id: int, days: int, reason: str, path: Path = DB_PATH) -> str:
+def extend(actor: dict, registration_id: int, days: int, reason: str, path: Path = DB_PATH) -> str:
     """보호 중인 등록의 만료일을 늘린다. 만료된 건은 그사이 다른 파트너가 잡았을 수 있어 대상이 아니다."""
+    _need_manager(actor)
     row = _load(registration_id, ("active",), path)
     reason = _need_reason(reason)
     if days <= 0:
@@ -74,9 +84,10 @@ def extend(registration_id: int, days: int, reason: str, path: Path = DB_PATH) -
     return new_exp
 
 
-def transfer(registration_id: int, to_partner_id: int, reason: str, path: Path = DB_PATH) -> None:
-    """다른 파트너에게 이관한다. 보호 기간(계약 고객은 계약 종료일)은 그대로 유지한다."""
-    row = _load(registration_id, ("active", "won"), path)
+def transfer(actor: dict, registration_id: int, to_partner_id: int, reason: str, path: Path = DB_PATH) -> None:
+    """다른 파트너에게 이관한다. 보호 기간(계약 고객은 유지보수·구독 종료일)과 상태는 그대로 유지한다."""
+    _need_manager(actor)
+    row = _load(registration_id, ("active", "won", "lapsed"), path)
     reason = _need_reason(reason)
     target = next((p for p in db.list_partners(path=path) if p["id"] == to_partner_id), None)
     if target is None:
@@ -94,13 +105,14 @@ def transfer(registration_id: int, to_partner_id: int, reason: str, path: Path =
     db.log("transfer", row["partner_name"], row["id"], f"[{ACTOR}] {detail}", path=path)  # 넘겨준 쪽 이력에도
 
 
-def rename(registration_id: int, new_name: str, reason: str, confirm_similar: bool = False,
+def rename(actor: dict, registration_id: int, new_name: str, reason: str, confirm_similar: bool = False,
            path: Path = DB_PATH) -> list[str]:
     """회사명을 바꾼다. 다른 등록과 같아지면 막고, 비슷하기만 하면 confirm_similar=True일 때만 진행한다.
 
     반환: 확인이 필요한 비슷한 등록 목록 (비어 있으면 변경 완료)
     """
-    row = _load(registration_id, ("active", "pending", "won"), path)
+    _need_manager(actor)
+    row = _load(registration_id, ("active", "pending", "won", "lapsed"), path)
     new_name = (new_name or "").strip()
     if not new_name:
         raise ActionError("새 회사명을 입력해 주세요.")
@@ -125,14 +137,43 @@ def rename(registration_id: int, new_name: str, reason: str, confirm_similar: bo
 # 파트너가 이메일을 바꾸면 발급 표시는 지워진다(새 이메일로 다시 발급해야 하므로) — app.py edit_section.
 
 def ency_queue(path: Path = DB_PATH) -> tuple[list[dict], list[dict]]:
-    """(발급 대기, 발급 완료) 계약 고객 목록. 대기는 수주가 오래된 순, 완료는 최근 발급 순."""
-    won = [r for r in db.list_registrations(statuses=("won",), path=path) if r["ency_account"]]
-    waiting = sorted((r for r in won if not r["ency_issued_at"]), key=lambda r: r["license_start"] or r["registered_at"])
-    done = sorted((r for r in won if r["ency_issued_at"]), key=lambda r: r["ency_issued_at"], reverse=True)
+    """(발급 대기, 발급 완료).
+
+    - 발급 대기: 계약 고객 중 이메일은 있고 아직 발급 표시가 없는 건 (수주가 오래된 순)
+    - 발급 완료: 지금까지 발급한 **모든** 계정 (누적, 최근 발급 순). 영구 라이선스 계정은 유지보수가 끝나도 계속 쓰인다.
+    """
+    regs = db.list_registrations(path=path)
+    waiting = sorted((r for r in regs if r["status"] == "won" and r["ency_account"] and not r["ency_issued_at"]),
+                     key=lambda r: r["license_start"] or r["registered_at"])
+    done = sorted((r for r in regs if r["ency_issued_at"]), key=lambda r: r["ency_issued_at"], reverse=True)
     return waiting, done
 
 
-def mark_ency_issued(registration_id: int, path: Path = DB_PATH) -> None:
+def account_status(row: dict) -> str:
+    """발급한 ENCY 계정의 지금 상태 (발급 완료 목록에 표시)."""
+    if row["status"] == "won":
+        return "유지보수 중" if db.is_perpetual(row) else "구독 중"
+    if row["status"] == "lapsed":
+        return "유지보수 만료 (사용 중)" if db.is_perpetual(row) else "구독 종료 (갱신 유예)"
+    if row["status"] == "expired":
+        return "구독 만료" if not db.is_perpetual(row) else "만료"
+    return {"released": "등록 해제", "rejected": "반려"}.get(row["status"], row["status"])
+
+
+def existing_account(row: dict, path: Path = DB_PATH) -> dict | None:
+    """같은 고객사(다른 등록)에 같은 이메일로 이미 발급한 계정이 있으면 그 등록. 다시 수주된 고객의 중복 발급 방지."""
+    email = (row["ency_account"] or "").lower()
+    if not email:
+        return None
+    for o in db.list_registrations(path=path):
+        if o["id"] != row["id"] and o["ency_issued_at"] and (o["ency_account"] or "").lower() == email \
+                and _same_customer(o, row):
+            return o
+    return None
+
+
+def mark_ency_issued(actor: dict, registration_id: int, path: Path = DB_PATH) -> None:
+    _need_manager(actor)
     row = _load(registration_id, ("won",), path)
     if not row["ency_account"]:
         raise ActionError("ENCY 계정 이메일이 없습니다. 파트너에게 이메일 입력을 요청해 주세요.")
@@ -142,9 +183,10 @@ def mark_ency_issued(registration_id: int, path: Path = DB_PATH) -> None:
           f"{row['company_name']} ENCY 계정 발급 완료 ({row['ency_account']})", path=path)
 
 
-def undo_ency_issued(registration_id: int, reason: str, path: Path = DB_PATH) -> None:
-    """잘못 누른 '발급 완료'를 되돌린다. 사유를 남긴다."""
-    row = _load(registration_id, ("won",), path)
+def undo_ency_issued(actor: dict, registration_id: int, reason: str, path: Path = DB_PATH) -> None:
+    """잘못 누른 '발급 완료'를 되돌린다. 사유를 남긴다. (발급 완료 목록은 누적이라 상태와 상관없이 가능)"""
+    _need_manager(actor)
+    row = _load(registration_id, ("won", "lapsed", "expired", "released", "rejected", "active", "pending"), path)
     reason = _need_reason(reason)
     if not row["ency_issued_at"]:
         raise ActionError("아직 발급 완료로 표시되지 않은 계정입니다.")
@@ -168,8 +210,9 @@ def extension_counts(path: Path = DB_PATH) -> dict[int, tuple[int, int]]:
             for r in regs}
 
 
-def restore(registration_id: int, reason: str, path: Path = DB_PATH) -> None:
+def restore(actor: dict, registration_id: int, reason: str, path: Path = DB_PATH) -> None:
     """반려를 취소하고 보호 중으로 되돌린다."""
+    _need_manager(actor)
     row = _load(registration_id, ("rejected",), path)
     reason = _need_reason(reason)
     if row["expires_on"] < date.today().isoformat():
@@ -177,3 +220,19 @@ def restore(registration_id: int, reason: str, path: Path = DB_PATH) -> None:
     if msg := _exact_conflict(row["company_name"], row["biz_no"], db.holding_registrations(path=path)):
         raise ActionError(f"되돌릴 수 없습니다. 그사이 등록된 건이 있습니다: {msg}")
     _save(row, {"status": "active"}, "restore", f"{row['company_name']} 반려 취소 → 보호 중 — {reason}", path=path)
+
+
+def approve(actor: dict, registration_id: int, path: Path = DB_PATH) -> None:
+    """검토 대기 등록을 승인한다(기존 등록과 별개 회사로 판단)."""
+    _need_manager(actor)
+    row = _load(registration_id, ("pending",), path)
+    db.set_status(registration_id, "active", path=path)
+    db.log("approve", row["partner_name"], registration_id, f"{row['company_name']} 승인(별개 회사로 판단)", path=path)
+
+
+def reject(actor: dict, registration_id: int, path: Path = DB_PATH) -> None:
+    """검토 대기 등록을 반려한다(기존 등록과 같은 회사로 판단)."""
+    _need_manager(actor)
+    row = _load(registration_id, ("pending",), path)
+    db.set_status(registration_id, "rejected", path=path)
+    db.log("reject", row["partner_name"], registration_id, f"{row['company_name']} 반려(기존 등록과 같은 회사)", path=path)

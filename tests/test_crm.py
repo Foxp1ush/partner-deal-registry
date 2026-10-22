@@ -8,6 +8,8 @@ import crm
 import db
 import seed
 
+MANAGER = {"role": "admin", "partner_role": "manager", "username": "admin"}  # 총판 총괄 매니저
+
 
 @pytest.fixture
 def env(tmp_path):
@@ -63,7 +65,7 @@ def test_history_continues_across_reregistration(env):
 def test_transfer_hides_previous_partner_notes(env):
     path, u, a, b, r1, r2 = env
     crm.add_activity(u["a-1"], r1, "미팅", "A의 비밀 메모", path=path)
-    admin.transfer(r1, b, "담당 변경", path=path)
+    admin.transfer(MANAGER, r1, b, "담당 변경", path=path)
     reg = db.get_registration(r1, path=path)
     assert reg["owner"] == ""
     assert crm.timeline(u["b-boss"], r1, path=path) == []  # B는 A의 기록을 못 봄
@@ -96,3 +98,18 @@ def test_admin_sees_aggregate_and_logged_detail(env):
     log = db.list_access_log(a, path=path)
     assert log[0]["reason"] == "선점 분쟁 확인" and log[0]["company_name"] == "샛별정밀"
     assert db.list_access_log(b, path=path) == []
+
+
+def test_admin_sees_records_from_before_transfer(env):
+    path, u, a, b, r1, r2 = env
+    crm.add_activity(u["a-1"], r1, "미팅", "A가 남긴 기록", path=path)
+    admin.transfer(MANAGER, r1, b, "고객이 파트너 변경 요청", path=path)
+    crm.add_activity(u["b-boss"], r1, "전화", "B가 남긴 기록", path=path)
+    # 새 파트너(B)에게는 A의 기록이 여전히 보이지 않는다
+    assert [x["note"] for x in crm.timeline(u["b-boss"], r1, path=path)] == ["B가 남긴 기록"]
+    # 총판은 이관 전 기록까지 기록한 파트너 이름과 함께 본다
+    detail = crm.admin_open_detail("admin", r1, "이관 분쟁 확인", path=path)
+    assert {(x["partner_name"], x["note"]) for x in detail} >= {("A", "A가 남긴 기록"), ("B", "B가 남긴 기록")}
+    # 열람 기록은 기록이 열린 파트너 모두에게 남는다
+    assert db.list_access_log(a, path=path)[0]["reason"] == "이관 분쟁 확인"
+    assert db.list_access_log(b, path=path)[0]["reason"] == "이관 분쟁 확인"

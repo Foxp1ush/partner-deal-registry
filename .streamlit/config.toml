@@ -7,7 +7,7 @@ font = "Noto Sans KR:https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@
 headingFont = "Noto Sans KR:https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap"
 baseFontSize = 15            # 기본 글자 크기(px)
 
-textColor = "#1e1d4d"        # 거의 모든 글자 색
+textColor = "#000000"        # 거의 모든 글자 색
 primaryColor = "#3182F6"     # 버튼·강조·선택 표시 색
 linkColor = "#3182F6"        # 링크 색
 backgroundColor = "#FFFFFF"  # 바탕색

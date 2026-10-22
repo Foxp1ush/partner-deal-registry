@@ -25,7 +25,8 @@ def check_password(password: str, stored: str) -> bool:
     return hmac.compare_digest(test, digest)
 
 
-_SESSION_KEYS = ("username", "role", "partner_id", "partner_name", "display_name", "partner_role", "must_change_pw")
+_SESSION_KEYS = ("username", "role", "partner_id", "partner_name", "display_name", "partner_role", "must_change_pw",
+                 "title", "department", "phone", "email")
 
 
 def _usable(acc: dict | None) -> bool:
